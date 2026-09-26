@@ -44,6 +44,12 @@ llm-hops serve -tail ~/yllm-gateway/var/requests.jsonl -from-start
 ```
 
 Rotation is survived, a partial line waits for its newline, and the same line never makes two traces.
+
+**Model loads from Ollama's own log.** On the machine that runs Ollama, `-ollama-journal` (or `ollama_journal
+= true` in the file) follows `journalctl -u ollama`: every "loading model via llama-server" ... "started in
+9.8 seconds" pair becomes a trace of its own, service `ollama`, name `load`, with the model's name (resolved
+through Ollama's API), the blob and the seconds. The stats count loads and time loading apart from requests.
+`ollama_since = "7 days ago"` reads the history first. This is the picture of "who else is using the GPU".
 `llm-hops import FILE` loads a file once; `llm-hops tail FILE -to URL` follows it from another machine.
 
 **From your code.** Spans are JSON; post a list to `POST /api/v1/spans`:

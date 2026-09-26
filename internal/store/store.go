@@ -397,7 +397,9 @@ type Stats struct {
 	P95MS         int64              `json:"p95_ms"`
 	MaxMS         int64              `json:"max_ms"`
 	ModelSwitches int                `json:"model_switches"`
-	Approx        bool               `json:"approx"` // part of the window comes from daily rollups (percentiles weighted)
+	Loads         int                `json:"loads"`   // model loads seen in Ollama's log (traces of kind load)
+	LoadMS        int64              `json:"load_ms"` // time spent loading, in the window
+	Approx        bool               `json:"approx"`  // part of the window comes from daily rollups (percentiles weighted)
 	Backends      []BackendStat      `json:"backends"`
 	Hops          map[string]HopStat `json:"hops"`
 	Buckets       []Bucket           `json:"buckets"`
@@ -429,6 +431,14 @@ func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
 		var attrs model.Attrs
 		_ = json.Unmarshal([]byte(attrsJSON), &attrs)
 		d := max(0, end-start)
+		switch attrString(attrs, "kind") {
+		case "load": // a model load from Ollama's log: not a request
+			st.Loads++
+			st.LoadMS += d
+			continue
+		case "unload":
+			continue
+		}
 		durations = append(durations, d)
 		st.Requests++
 		if status == "error" {
