@@ -38,6 +38,8 @@
   const hashView = (location.hash.match(/^#(flow|traces|stats)/) || [])[1];
   if (hashView) state.view = hashView;
   const hashTrace = (location.hash.match(/trace=([0-9a-f-]+)/) || [])[1];
+  const hashWindow = Number((location.hash.match(/w=(\d+)/) || [])[1]);
+  if (hashWindow) state.windowMs = hashWindow;
 
   const fmtMs = (ms) => ms == null ? "" : ms < 1000 ? `${Math.round(ms)} ms` : ms < 60000 ? `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s` : `${(ms / 60000).toFixed(1)} min`;
   const fmtTime = (ms) => { const d = new Date(ms); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
@@ -99,7 +101,7 @@
     state.flow = flow;
     const services = flow.services.map((s) => s.service);
     if (!services.length) {
-      flowMap.replaceChildren(el("p", { class: "muted", text: "No traces in this window yet." }));
+      emptyHint(flowMap);
       mapGeom = null;
       return;
     }
@@ -229,6 +231,16 @@
 
   // ---- kpis and stats ---------------------------------------------------------------------------------
   const kpi = (v, l, cls = "") => el("div", { class: `kpi ${cls}` }, el("div", { class: "v", text: v }), el("div", { class: "l", text: l }));
+  const emptyHint = async (target) => {
+    let newest = null;
+    try { newest = (await api("/api/v1/traces", { limit: 1 })).traces[0]; } catch (e) { /* the caption below covers it */ }
+    const wider = [...$("#window").options].map((o) => Number(o.value)).find((v) => v > state.windowMs);
+    target.replaceChildren(el("p", { class: "muted" },
+      newest ? `Nothing in this window. The newest trace is from ${fmtDate(newest.start_ms)}. ` : "No traces yet. ",
+      wider && newest ? el("button", { class: "btn", text: `Show the last ${$("#window").querySelector(`option[value="${wider}"]`).textContent.replace("last ", "")}`,
+        onclick: () => { $("#window").value = String(wider); state.windowMs = wider; refresh(); } }) : null,
+      newest ? null : el("span", {}, "Send some: ", el("code", { text: "llm-hops demo" }), ", or follow a request log with ", el("code", { text: "llm-hops serve -tail FILE" }), ".")));
+  };
   const renderKpis = (target, st) => {
     const errPct = st.requests ? (100 * st.errors / st.requests) : 0;
     const perMin = st.requests / Math.max(1, (st.until_ms - st.since_ms) / 60000);
@@ -244,7 +256,7 @@
   const renderRpm = (st) => {
     const target = $("#rpm-chart");
     const buckets = st.buckets;
-    if (!buckets.length) { target.replaceChildren(el("p", { class: "muted", text: "Nothing in this window." })); return; }
+    if (!buckets.length) { emptyHint(target); return; }
     const W = 900, H = 180, L = 40, R = 10, T = 10, B = 26;
     const t0 = st.since_ms, t1 = st.until_ms, bw = st.bucket_ms;
     const n = Math.max(1, Math.ceil((t1 - t0) / bw));
@@ -329,6 +341,7 @@
     state.traces = traces;
     tbody.replaceChildren(...traces.map((t) => rowFor(t, false)));
     $("#traces-empty").hidden = traces.length > 0;
+    if (!traces.length) emptyHint($("#traces-empty"));
     $("#traces-count").textContent = traces.length ? `${traces.length} trace${traces.length === 1 ? "" : "s"}${traces.length >= 500 ? " (the newest 500)" : ""}` : "";
   };
   const matchesFilters = (t) => {
@@ -477,6 +490,7 @@
   const scheduleRefresh = () => { if (refreshQueued) return; refreshQueued = true; setTimeout(() => { refreshQueued = false; refresh(); }, 2500); };
 
   // ---- controls ---------------------------------------------------------------------------------------
+  $("#window").value = String(state.windowMs);
   $("#window").addEventListener("change", (e) => { state.windowMs = Number(e.target.value); refresh(); });
   let qTimer;
   $("#q").addEventListener("input", (e) => { state.q = e.target.value.trim(); clearTimeout(qTimer); qTimer = setTimeout(() => { if (state.view !== "traces") setView("traces"); else refresh(); }, 250); });
