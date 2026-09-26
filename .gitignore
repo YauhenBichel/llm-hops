@@ -1,0 +1,14 @@
+*.db
+*.db-wal
+*.db-shm
+/dist/
+/llm-hops
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+/sdk/python/dist/
+.DS_Store

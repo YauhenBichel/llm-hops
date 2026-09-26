@@ -1,0 +1,145 @@
+# Copyright 2026 Yauhen Bichel
+# SPDX-License-Identifier: Apache-2.0
+"""yllm-gateway's request log, one JSON line per request, becomes one trace per line:
+
+    request (gateway)               ts .. ts + total_ms
+      queue (gateway)               0 .. queue_ms                 wait for a slot, if any
+      upstream (<backend>)          queue_ms .. queue_ms + upstream_ms
+        first token at ttft_ms      as an attribute, drawn as a marker
+      reply (gateway)               the rest, if the total is longer than queue + upstream
+
+The log's `ts` has second resolution; the durations are milliseconds. So every span in a trace is placed
+exactly relative to the request's start, and the start itself is known to the second. The trace id is a hash
+of the line, so following the same file twice produces the same traces, never duplicates.
+
+The line's fields (yllm-gateway, September 2026): ts, wire, path, client, requested_model, served_model, role,
+route, backend, memory, stream, status, queue_ms, upstream_ms, ttft_ms, total_ms, prompt_tokens,
+completion_tokens, tok_per_s, fallback, error, key_id. No prompt or completion text is in the log, so none
+reaches llm-hops.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import os
+import time
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+from ..model import Attrs, Span
+
+ROOT_ATTRS = ("wire", "path", "client", "requested_model", "role", "route", "backend", "memory", "stream",
+              "prompt_tokens", "completion_tokens", "tok_per_s", "fallback", "error", "key_id",
+              "queue_ms", "upstream_ms", "ttft_ms", "total_ms")
+
+
+def line_to_spans(line: str, service: str = "gateway") -> list[Span]:
+    """One log line to its spans; an empty list for a line that is not a request record."""
+    line = line.strip()
+    if not line:
+        return []
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        return []
+    if not isinstance(rec, dict) or "ts" not in rec or "wire" not in rec:
+        return []
+    start = _parse_ts(str(rec["ts"]))
+    if start is None:
+        return []
+    tid = hashlib.sha1(line.encode()).hexdigest()[:32]  # noqa: S324 (an identifier, not a secret)
+    total = _int(rec.get("total_ms"))
+    queue = _int(rec.get("queue_ms"))
+    upstream = rec.get("upstream_ms")
+    status_code = _int(rec.get("status"))
+    error = "error" if status_code >= 500 or rec.get("error") else "ok"
+    root_attrs: Attrs = {k: _attr(rec.get(k)) for k in ROOT_ATTRS if rec.get(k) is not None}
+    root_attrs["model"] = str(rec.get("served_model") or rec.get("requested_model") or "?")
+    root_attrs["status_code"] = status_code
+    root = Span(tid, "root", service, "request", start, start + max(total, queue + _int(upstream)), None, error, root_attrs)
+    spans = [root]
+    t = start
+    if queue > 0:
+        spans.append(Span(tid, "queue", service, "queue", t, t + queue, "root", "ok", {"queue_ms": queue}))
+    t += queue
+    if upstream is not None:
+        backend = str(rec.get("backend") or "ollama")
+        up_attrs: Attrs = {"model": root_attrs["model"], "backend": backend}
+        if rec.get("ttft_ms") is not None:
+            up_attrs["ttft_ms"] = _int(rec.get("ttft_ms"))
+        if rec.get("completion_tokens") is not None:
+            up_attrs["completion_tokens"] = _int(rec.get("completion_tokens"))
+        if rec.get("tok_per_s") is not None:
+            up_attrs["tok_per_s"] = float(rec["tok_per_s"])
+        up_status = "error" if rec.get("error") in ("timeout", "connect", "status_5xx", "stream", "embedder") else "ok"
+        if rec.get("error"):
+            up_attrs["error"] = str(rec["error"])
+        spans.append(Span(tid, "upstream", backend, "upstream", t, t + _int(upstream), "root", up_status, up_attrs))
+        t += _int(upstream)
+    if rec.get("error") == "context_length":
+        spans.append(Span(tid, "check", service, "check", start + queue, start + queue + 1, "root", "error",
+                          {"error": "context_length"}))
+    if total > (t - start) + 1:
+        spans.append(Span(tid, "reply", service, "reply", t, start + total, "root", "ok", {}))
+    return spans
+
+
+def follow(path: str | Path, *, from_start: bool = False, poll_s: float = 0.5,
+           stop: Any = None) -> Iterator[str]:
+    """Yield lines as they are appended, surviving the log's rotation (the file is reopened when its inode
+    changes or it shrinks). `from_start` reads what is there first; the default starts at the end."""
+    p = Path(path)
+    fh = None
+    ino = None
+    pos = 0
+    while stop is None or not stop.is_set():
+        try:
+            st = os.stat(p)
+        except FileNotFoundError:
+            time.sleep(poll_s)
+            continue
+        if fh is None or st.st_ino != ino or st.st_size < pos:
+            if fh:
+                fh.close()
+            fh = open(p, encoding="utf-8", errors="replace")
+            ino = st.st_ino
+            if fh is not None and ino is not None and pos == 0 and not from_start:
+                fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+        line = fh.readline()
+        if line:
+            pos = fh.tell()
+            if line.endswith("\n"):
+                yield line
+            else:  # a partial write: wait for the rest
+                fh.seek(pos - len(line))
+                pos = fh.tell()
+                time.sleep(poll_s)
+        else:
+            time.sleep(poll_s)
+    if fh:
+        fh.close()
+
+
+def _parse_ts(ts: str) -> int | None:
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        return int(dt.datetime.fromisoformat(ts).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def _int(v: Any) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _attr(v: Any) -> str | int | float | bool | None:
+    if isinstance(v, str | int | float | bool) or v is None:
+        return v
+    return str(v)

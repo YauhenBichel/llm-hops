@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-hops</title>
+<meta name="description" content="See every hop of a request through your local LLM system.">
+<link rel="stylesheet" href="/ui/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='7' cy='16' r='4' fill='%236b5bd2'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%232a78d6'/%3E%3Ccircle cx='25' cy='16' r='4' fill='%23d97757'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><circle cx="7" cy="16" r="4" fill="#6b5bd2"/><circle cx="16" cy="16" r="4" fill="#2a78d6"/><circle cx="25" cy="16" r="4" fill="#d97757"/><path d="M11 16h1M20 16h1" stroke="currentColor" stroke-width="2"/></svg>
+    <h1>llm-hops</h1>
+    <span class="live" id="live" title="The live stream from the server"><span class="dot"></span><span id="live-text">connecting</span></span>
+  </div>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button class="tab" role="tab" data-view="flow" aria-selected="true">Flow</button>
+    <button class="tab" role="tab" data-view="traces" aria-selected="false">Traces</button>
+    <button class="tab" role="tab" data-view="stats" aria-selected="false">Stats</button>
+  </nav>
+  <div class="controls">
+    <label class="sr-only" for="window">Time window</label>
+    <select id="window" title="Time window">
+      <option value="900000">last 15 min</option>
+      <option value="3600000" selected>last hour</option>
+      <option value="21600000">last 6 hours</option>
+      <option value="86400000">last 24 hours</option>
+      <option value="604800000">last 7 days</option>
+    </select>
+    <label class="sr-only" for="q">Search</label>
+    <input id="q" type="search" placeholder="search model, client, error…" autocomplete="off">
+    <button id="pause" class="btn" aria-pressed="false" title="Pause the live updates (space)">Pause</button>
+    <button id="theme" class="btn icon" aria-label="Switch theme" title="Theme: auto, light, dark">◐</button>
+  </div>
+</header>
+
+<main>
+  <section id="view-flow" class="view" role="tabpanel">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>How requests move</h2>
+        <p class="muted" id="flow-caption">Every service seen in the window, and every hop between them. Live requests travel along the edges.</p>
+      </div>
+      <div id="flow-map" class="flow-map" aria-label="Flow map"></div>
+      <div class="legend" id="flow-legend"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Just now</h2><p class="muted">The newest requests. Click one to open it.</p></div>
+      <ol id="ticker" class="ticker" aria-live="polite"></ol>
+    </div>
+    <div class="kpis" id="flow-kpis"></div>
+  </section>
+
+  <section id="view-traces" class="view" role="tabpanel" hidden>
+    <div class="filters" id="filters">
+      <label>Model <select id="f-model"><option value="">all</option></select></label>
+      <label>Client <select id="f-client"><option value="">all</option></select></label>
+      <label>Service <select id="f-service"><option value="">all</option></select></label>
+      <label>Status <select id="f-status"><option value="">all</option><option value="ok">ok</option><option value="error">error</option></select></label>
+      <label>Slower than <input id="f-min" type="number" min="0" step="100" placeholder="ms" style="width:6em"></label>
+      <span class="muted" id="traces-count"></span>
+    </div>
+    <div class="table-wrap">
+      <table id="traces" class="traces">
+        <thead><tr>
+          <th scope="col">time</th><th scope="col">client</th><th scope="col">wire</th><th scope="col">model</th>
+          <th scope="col">status</th><th scope="col" class="num">queue</th><th scope="col" class="num">first token</th>
+          <th scope="col" class="num">total</th><th scope="col" class="num">tokens</th><th scope="col" class="num">tok/s</th><th scope="col">hops</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted" id="traces-empty" hidden>No traces in this window. Send some: <code>llm-hops demo</code>, or follow a request log with <code>llm-hops serve -tail FILE</code>.</p>
+    </div>
+  </section>
+
+  <section id="view-stats" class="view" role="tabpanel" hidden>
+    <div class="kpis" id="stats-kpis"></div>
+    <div class="panel">
+      <div class="panel-head"><h2>Requests per minute</h2><p class="muted" id="rpm-caption"></p></div>
+      <div id="rpm-chart" class="chart"></div>
+    </div>
+    <div class="two">
+      <div class="panel">
+        <div class="panel-head"><h2>Per hop</h2><p class="muted">Where the time goes: median and 95th percentile of each hop, over every trace in the window.</p></div>
+        <table id="hops" class="small"><thead><tr><th scope="col">hop</th><th scope="col" class="num">n</th><th scope="col" class="num">p50</th><th scope="col" class="num">p95</th><th scope="col">share</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Per model</h2><p class="muted">Requests, errors and the duration percentiles by served model.</p></div>
+        <table id="models" class="small"><thead><tr><th scope="col">model</th><th scope="col" class="num">requests</th><th scope="col" class="num">errors</th><th scope="col" class="num">p50</th><th scope="col" class="num">p95</th><th scope="col" class="num">tokens out</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer" hidden aria-label="Trace detail">
+  <div class="drawer-head">
+    <div>
+      <h2 id="d-title">Trace</h2>
+      <p class="muted mono" id="d-sub"></p>
+    </div>
+    <div>
+      <button class="btn" id="d-copy" title="Copy the trace id">Copy id</button>
+      <button class="btn icon" id="d-close" aria-label="Close (Esc)">✕</button>
+    </div>
+  </div>
+  <div id="d-waterfall" class="waterfall"></div>
+  <div id="d-spans" class="span-list"></div>
+</aside>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<script src="/ui/app.js"></script>
+</body>
+</html>
