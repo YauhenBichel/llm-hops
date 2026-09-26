@@ -40,6 +40,10 @@
   const hashTrace = (location.hash.match(/trace=([0-9a-f-]+)/) || [])[1];
   const hashWindow = Number((location.hash.match(/w=(\d+)/) || [])[1]);
   if (hashWindow) state.windowMs = hashWindow;
+  // a token in the address (#token=...) becomes the cookie the server checks, then leaves the address
+  const hashToken = (location.hash.match(/token=([^&]+)/) || [])[1];
+  const session = hashToken ? fetch("/api/v1/session", { method: "POST", headers: { authorization: `Bearer ${decodeURIComponent(hashToken)}` } })
+    .then(() => history.replaceState(null, "", location.hash.replace(/&?token=[^&]+/, "") || "#flow")).catch(() => {}) : Promise.resolve();
 
   const fmtMs = (ms) => ms == null ? "" : ms < 1000 ? `${Math.round(ms)} ms` : ms < 60000 ? `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s` : `${(ms / 60000).toFixed(1)} min`;
   const fmtTime = (ms) => { const d = new Date(ms); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
@@ -465,7 +469,7 @@
         state.stats = st; renderKpis($("#stats-kpis"), st); renderRpm(st); renderHopTable(st); renderModelTable(st);
       }
     } catch (e) {
-      $("#live-text").textContent = `server unreachable`;
+      $("#live-text").textContent = String(e.message || "").startsWith("401") ? "token required: open the page as /#token=..." : "server unreachable";
       $("#live").className = "live";
     }
   };
@@ -524,8 +528,10 @@
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
-  setView(state.view);
-  if (hashTrace) openTrace(hashTrace);
-  connect();
+  session.then(() => {
+    setView(state.view);
+    if (hashTrace) openTrace(hashTrace);
+    connect();
+  });
   setInterval(() => { if (!state.paused && !document.hidden) refresh(); }, 30000);
 })();

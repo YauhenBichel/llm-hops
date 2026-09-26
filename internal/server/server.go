@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/YauhenBichel/llm-hops/internal/model"
@@ -72,8 +73,12 @@ type Server struct {
 	Store   *store.Store
 	Bus     *Broadcast
 	Title   string
+	Token   string // when set, every call but the health check needs it (auth.go)
 	started time.Time
 	mux     *http.ServeMux
+
+	spansReceived atomic.Int64
+	spansRejected atomic.Int64
 }
 
 // New wires the routes.
@@ -87,13 +92,25 @@ func New(st *store.Store, bus *Broadcast) *Server {
 	s.mux.HandleFunc("GET /api/v1/facets", s.getFacets)
 	s.mux.HandleFunc("GET /api/v1/stream", s.stream)
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
+	s.mux.HandleFunc("POST /api/v1/session", s.setCookie)
+	s.mux.HandleFunc("GET /metrics", s.metrics)
 	s.mux.HandleFunc("GET /ui/{name}", s.uiFile)
 	s.mux.HandleFunc("GET /{$}", s.index)
 	return s
 }
 
 // ServeHTTP makes Server an http.Handler.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) && r.URL.Path != "/api/v1/session" {
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics" {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "a token is required (Authorization: Bearer ..., or open the page once as /#token=...)", http.StatusUnauthorized)
+			return
+		}
+		// the page itself is served: it reads #token= from its address and asks for the cookie
+	}
+	s.mux.ServeHTTP(w, r)
+}
 
 // Publish announces the traces touched by an insert (used by the API and by the in-process adapters).
 func (s *Server) Publish(touched []string) {
@@ -140,6 +157,8 @@ func (s *Server) postSpans(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "store: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.spansReceived.Add(int64(len(spans)))
+	s.spansRejected.Add(int64(rejected))
 	s.Publish(touched)
 	if touched == nil {
 		touched = []string{}

@@ -75,17 +75,35 @@ names the page draws with meaning: `decide`, `check`, `queue`, `load`, `prefill`
 | `GET /api/v1/stream` | server-sent events: one per trace touched |
 | `GET /api/v1/health` | ok, time, database path, uptime |
 
-Times are milliseconds since the epoch. Traces older than `-keep-days` (14) are dropped every ten minutes.
+| `GET /metrics` | Prometheus text: the last five minutes, per hop and per model |
+
+Times are milliseconds since the epoch. Spans older than `keep_days` (14) are rolled up into daily statistics
+per model and dropped every ten minutes; the stats view shows rolled-up days too, marked approximate.
 
 ## Running it for real
 
-`llm-hops serve` listens on loopback by default. Put it behind your SSH tunnel or a reverse proxy with
-authentication before exposing it: the API has no accounts. A systemd unit and the setup used on the
+`llm-hops serve` listens on loopback by default; `llm-hops config` prints a configuration file to start from.
+A `token` guards the API and the page when you need more than loopback (`Authorization: Bearer` for senders,
+`/#token=…` once for a browser). `llm-hops export` and `import` move a store between machines. A systemd unit and the setup used on the
 author's server are in [docs/deploy.md](docs/deploy.md). The SQLite file is written with WAL and
 `synchronous=FULL`, so a power cut loses no span that was acknowledged.
 
 What is **not** stored: prompts, completions, keys. What the page shows is what the spans carry, so the rule
 is on the sender: [docs/privacy.md](docs/privacy.md).
+
+## Numbers
+
+Measured on 26 September 2026 on a laptop (Apple M-series), `llm-hops bench -rate 10000 -seconds 10` against a
+fresh server on the same machine:
+
+| | |
+|---|---|
+| spans sent | 100,318 in 100 posts over 10.1 s (9,935 spans/s) |
+| accepted | 100,318; no post failed; the slowest post took 54 ms |
+| server memory after | 33 MB resident |
+| the page during the load | answered in 0.5 ms |
+| statistics over everything (13,742 traces, 100k spans) | 561 ms |
+| database | 30 MB |
 
 ## Building
 

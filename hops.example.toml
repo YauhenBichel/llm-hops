@@ -1,0 +1,9 @@
+# llm-hops configuration. Every key is optional; flags on the command line win over this file.
+listen = "127.0.0.1:11602"
+db = "hops.db"
+keep_days = 14            # spans older than this become daily statistics and are dropped
+tail = []                 # yllm-gateway request logs to follow, e.g. ["/home/me/yllm-gateway/var/requests.jsonl"]
+from_start = false        # read the whole log first, then follow
+# token = "..."           # when set, POST /api/v1/spans, the API and the page need it
+                          # (Authorization: Bearer, or open the page once as /#token=...); LLM_HOPS_TOKEN overrides
+title = "llm-hops"
