@@ -51,6 +51,11 @@
       <ol id="ticker" class="ticker" aria-live="polite"></ol>
     </div>
     <div class="kpis" id="flow-kpis"></div>
+    <div class="panel">
+      <div class="panel-head"><h2>Local or cloud</h2><p class="muted" id="split-caption">Where the requests went in the window, and what they cost in tokens. Live.</p></div>
+      <div id="split" class="split"></div>
+      <table id="backends" class="small"><thead><tr><th scope="col">where</th><th scope="col">provider</th><th scope="col" class="num">requests</th><th scope="col" class="num">errors</th><th scope="col" class="num">tokens in</th><th scope="col" class="num">tokens out</th><th scope="col" class="num">p50</th><th scope="col" class="num">p95</th></tr></thead><tbody></tbody></table>
+    </div>
   </section>
 
   <section id="view-traces" class="view" role="tabpanel" hidden>

@@ -157,3 +157,30 @@ func TestPageAndAssets(t *testing.T) {
 		t.Fatalf("missing asset: %d", r.StatusCode)
 	}
 }
+
+func TestOTLPTracesArrive(t *testing.T) {
+	_, ts := newServer(t)
+	body := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"agent"}}]},"scopeSpans":[{"spans":[
+	  {"traceId":"abcdef0123456789abcdef0123456789","spanId":"1111111111111111","name":"chat","startTimeUnixNano":"1790409578748000000","endTimeUnixNano":"1790409579748000000",
+	   "attributes":[{"key":"gen_ai.request.model","value":{"stringValue":"m"}},{"key":"gen_ai.usage.output_tokens","value":{"intValue":"9"}}]}]}]}]}`
+	r, err := http.Post(ts.URL+"/v1/traces", "application/json", strings.NewReader(body))
+	if err != nil || r.StatusCode != 200 {
+		t.Fatalf("%v %v", err, r)
+	}
+	code, out := get(t, ts, "/api/v1/traces/abcdef0123456789abcdef0123456789")
+	if code != 200 {
+		t.Fatalf("%d %v", code, out)
+	}
+	tr := out["trace"].(map[string]any)
+	if tr["service"] != "agent" || tr["duration_ms"] != float64(1000) || tr["attrs"].(map[string]any)["model"] != "m" {
+		t.Fatalf("%v", tr)
+	}
+	r, _ = http.Post(ts.URL+"/v1/traces", "application/x-protobuf", strings.NewReader("x"))
+	if r.StatusCode != 415 {
+		t.Fatalf("protobuf must be refused with a hint: %d", r.StatusCode)
+	}
+	r, _ = http.Get(ts.URL + "/api/openapi.json")
+	if r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("openapi: %d", r.StatusCode)
+	}
+}

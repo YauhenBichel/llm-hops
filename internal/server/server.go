@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/YauhenBichel/llm-hops/internal/model"
+	"github.com/YauhenBichel/llm-hops/internal/otlp"
 	"github.com/YauhenBichel/llm-hops/internal/store"
 	"github.com/YauhenBichel/llm-hops/ui"
 )
@@ -94,6 +95,8 @@ func New(st *store.Store, bus *Broadcast) *Server {
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
 	s.mux.HandleFunc("POST /api/v1/session", s.setCookie)
 	s.mux.HandleFunc("GET /metrics", s.metrics)
+	s.mux.HandleFunc("POST /v1/traces", s.postOTLP)
+	s.mux.HandleFunc("GET /api/openapi.json", s.openapi)
 	s.mux.HandleFunc("GET /ui/{name}", s.uiFile)
 	s.mux.HandleFunc("GET /{$}", s.index)
 	return s
@@ -101,8 +104,8 @@ func New(st *store.Store, bus *Broadcast) *Server {
 
 // ServeHTTP makes Server an http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(r) && r.URL.Path != "/api/v1/session" {
-		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics" {
+	if !s.authorized(r) && r.URL.Path != "/api/v1/session" && r.URL.Path != "/api/openapi.json" {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") || r.URL.Path == "/metrics" {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "a token is required (Authorization: Bearer ..., or open the page once as /#token=...)", http.StatusUnauthorized)
 			return
@@ -164,6 +167,39 @@ func (s *Server) postSpans(w http.ResponseWriter, r *http.Request) {
 		touched = []string{}
 	}
 	writeJSON(w, map[string]any{"accepted": len(spans), "rejected": rejected, "traces": touched})
+}
+
+// postOTLP takes OpenTelemetry traces in OTLP/JSON: what any OpenTelemetry SDK's OTLP HTTP exporter sends
+// with the JSON encoding to <server>/v1/traces. The reply is the protocol's ExportTraceServiceResponse.
+func (s *Server) postOTLP(w http.ResponseWriter, r *http.Request) {
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "application/x-protobuf") {
+		http.Error(w, "OTLP over protobuf is not supported yet; set the exporter's encoding to JSON (OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json)", http.StatusUnsupportedMediaType)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	if err != nil {
+		http.Error(w, "body too large or unreadable", http.StatusRequestEntityTooLarge)
+		return
+	}
+	spans, skipped, err := otlp.Decode(body)
+	if err != nil {
+		http.Error(w, "not OTLP/JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	touched, err := s.Store.Add(spans)
+	if err != nil {
+		http.Error(w, "store: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.spansReceived.Add(int64(len(spans)))
+	s.spansRejected.Add(int64(skipped))
+	s.Publish(touched)
+	out := map[string]any{}
+	if skipped > 0 {
+		out["partialSuccess"] = map[string]any{"rejectedSpans": skipped, "errorMessage": "spans without a trace id or a start time were skipped"}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) getTraces(w http.ResponseWriter, r *http.Request) {
