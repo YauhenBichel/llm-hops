@@ -195,9 +195,11 @@ func jsonString(s string) string {
 // Follow runs `journalctl -u ollama -f -o cat` (plus what is there since `since`) and sends every finished
 // load's spans to out until ctx ends.
 func Follow(ctx context.Context, since string, names Namer, out chan<- []model.Span) error {
-	args := []string{"-u", "ollama", "-f", "-o", "short-iso", "--no-pager", "-n", "0"}
+	args := []string{"-u", "ollama", "-f", "-o", "short-iso", "--no-pager"}
 	if since != "" {
-		args = append(args[:len(args)-2], "--since", since)
+		args = append(args, "--since", since)
+	} else {
+		args = append(args, "-n", "0")
 	}
 	cmd := exec.CommandContext(ctx, "journalctl", args...)
 	pipe, err := cmd.StdoutPipe()

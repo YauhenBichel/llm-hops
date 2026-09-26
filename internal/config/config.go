@@ -23,6 +23,7 @@ type Config struct {
 	Title         string   `toml:"title"`          // the page's title
 	OllamaJournal bool     `toml:"ollama_journal"` // follow journalctl -u ollama for model loads
 	OllamaURL     string   `toml:"ollama_url"`     // to name the loaded blobs (default http://127.0.0.1:11434)
+	OllamaSince   string   `toml:"ollama_since"`   // read the journal from here first, e.g. "7 days ago"; empty means from now
 	Demo          int      `toml:"demo"`           // synthetic traces to load at start
 	Live          bool     `toml:"live"`           // with demo: keep adding one trace a second
 }
@@ -74,6 +75,7 @@ tail = []                 # yllm-gateway request logs to follow, e.g. ["/home/me
 from_start = false        # read the whole log first, then follow
 ollama_journal = false    # follow journalctl -u ollama on this machine: every model load becomes a trace
 ollama_url = "http://127.0.0.1:11434"   # to name the loaded models
+ollama_since = ""         # e.g. "7 days ago": read the journal's history first, then follow
 # token = "..."           # when set, POST /api/v1/spans, the API and the page need it
                           # (Authorization: Bearer, or open the page once as /#token=...); LLM_HOPS_TOKEN overrides
 title = "llm-hops"

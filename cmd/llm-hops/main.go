@@ -215,7 +215,7 @@ func serve(args []string) error {
 			cancelJournal()
 		}()
 		go func() {
-			if err := ollama.Follow(ctx, "", &ollama.APINamer{Base: cfg.OllamaURL}, loads); err != nil && ctx.Err() == nil {
+			if err := ollama.Follow(ctx, cfg.OllamaSince, &ollama.APINamer{Base: cfg.OllamaURL}, loads); err != nil && ctx.Err() == nil {
 				log.Printf("ollama journal: %v", err)
 			}
 		}()
