@@ -179,4 +179,3 @@ func TestALineWithATraceIDUsesItAndTheGatewaysSpanIDs(t *testing.T) {
 		}
 	}
 }
-

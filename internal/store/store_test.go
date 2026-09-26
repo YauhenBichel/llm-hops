@@ -160,3 +160,28 @@ func TestOpenSetsWALAndFull(t *testing.T) {
 		t.Fatalf("synchronous=%d err=%v", sync, err)
 	}
 }
+
+func TestAddIfAbsentNeverOverwritesAndAddWins(t *testing.T) {
+	s := open(t)
+	exact := model.Span{TraceID: "t", SpanID: "root", Service: "gateway", Name: "request", StartMS: 1000, EndMS: 2000, ParentID: "harness1", Attrs: model.Attrs{"model": "m"}}
+	coarse := model.Span{TraceID: "t", SpanID: "root", Service: "gateway", Name: "request", StartMS: 1000, EndMS: 2000, Attrs: model.Attrs{"model": "m"}}
+	// the log's version first, then the service's own: the exact one replaces it
+	s.AddIfAbsent([]model.Span{coarse})
+	s.Add([]model.Span{exact})
+	sp, _ := s.Trace("t")
+	if sp[0].ParentID != "harness1" {
+		t.Fatalf("exact must replace: %+v", sp[0])
+	}
+	// the service's own first, then the log's: the log's is ignored
+	s.AddIfAbsent([]model.Span{coarse})
+	sp, _ = s.Trace("t")
+	if sp[0].ParentID != "harness1" {
+		t.Fatalf("log must not overwrite: %+v", sp[0])
+	}
+	// a span the log knows and the service did not post is still added
+	touched, _ := s.AddIfAbsent([]model.Span{{TraceID: "t", SpanID: "reply", ParentID: "root", Service: "gateway", Name: "reply", StartMS: 1990, EndMS: 2000}})
+	sp, _ = s.Trace("t")
+	if len(sp) != 2 || len(touched) != 1 {
+		t.Fatalf("%d spans, touched %v", len(sp), touched)
+	}
+}

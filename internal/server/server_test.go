@@ -184,3 +184,16 @@ func TestOTLPTracesArrive(t *testing.T) {
 		t.Fatalf("openapi: %d", r.StatusCode)
 	}
 }
+
+func TestIfAbsentFlagOnThePost(t *testing.T) {
+	_, ts := newServer(t)
+	post(t, ts, `[{"trace_id":"ia","span_id":"root","service":"gateway","name":"request","start_ms":1,"end_ms":9,"parent_id":"p1","attrs":{"model":"m"}}]`)
+	code, out := post(t, ts, `{"spans":[{"trace_id":"ia","span_id":"root","service":"gateway","name":"request","start_ms":1,"end_ms":9,"attrs":{"model":"m"}}],"if_absent":true}`)
+	if code != 200 || out["accepted"] != float64(1) {
+		t.Fatalf("%d %v", code, out)
+	}
+	_, tr := get(t, ts, "/api/v1/traces/ia")
+	if tr["spans"].([]any)[0].(map[string]any)["parent_id"] != "p1" {
+		t.Fatalf("the log-derived span overwrote the service's: %v", tr)
+	}
+}
