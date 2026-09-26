@@ -197,3 +197,12 @@ func TestIfAbsentFlagOnThePost(t *testing.T) {
 		t.Fatalf("the log-derived span overwrote the service's: %v", tr)
 	}
 }
+
+func TestLoadsEndpoint(t *testing.T) {
+	_, ts := newServer(t)
+	post(t, ts, `[{"trace_id":"ld","span_id":"ld","service":"ollama","name":"load","start_ms":10,"end_ms":20,"attrs":{"model":"m","kind":"load"}}]`)
+	code, out := get(t, ts, "/api/v1/loads?since=0&until=100")
+	if code != 200 || len(out["loads"].([]any)) != 1 {
+		t.Fatalf("%d %v", code, out)
+	}
+}

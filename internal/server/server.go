@@ -91,6 +91,7 @@ func New(st *store.Store, bus *Broadcast) *Server {
 	s.mux.HandleFunc("GET /api/v1/stats", s.getStats)
 	s.mux.HandleFunc("GET /api/v1/flow", s.getFlow)
 	s.mux.HandleFunc("GET /api/v1/facets", s.getFacets)
+	s.mux.HandleFunc("GET /api/v1/loads", s.getLoads)
 	s.mux.HandleFunc("GET /api/v1/stream", s.stream)
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
 	s.mux.HandleFunc("POST /api/v1/session", s.setCookie)
@@ -212,7 +213,7 @@ func (s *Server) postOTLP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getTraces(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := store.Filter{Since: optInt(q, "since"), Until: optInt(q, "until"), MinMS: optInt(q, "min_ms"),
-		Model: q.Get("model"), Service: q.Get("service"), Status: q.Get("status"), Client: q.Get("client"), Q: q.Get("q")}
+		Model: q.Get("model"), Service: q.Get("service"), Status: q.Get("status"), Client: q.Get("client"), Q: q.Get("q"), Kind: q.Get("kind")}
 	if v := optInt(q, "limit"); v != nil {
 		f.Limit = int(*v)
 	}
@@ -278,6 +279,16 @@ func (s *Server) getFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"since_ms": since, "until_ms": until, "edges": edges, "services": services})
+}
+
+func (s *Server) getLoads(w http.ResponseWriter, r *http.Request) {
+	since, until := window(r.URL.Query(), 3_600_000)
+	loads, err := s.Store.Loads(since, until)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"since_ms": since, "until_ms": until, "loads": loads})
 }
 
 func (s *Server) getFacets(w http.ResponseWriter, r *http.Request) {

@@ -157,6 +157,14 @@ table.small th, table.small td { padding: 5px 8px; font-size: 13px; }
 .tip[hidden] { display: none; }
 .tip b { color: inherit; }
 
+/* the model timeline */
+.timeline svg { width: 100%; height: auto; display: block; }
+.timeline .band { stroke: var(--panel); stroke-width: 1; }
+.timeline .band:hover { opacity: .85; }
+.timeline .loadmark { fill: var(--ink); opacity: .55; }
+.timeline .axis { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+.timeline .band-label { fill: #fff; font-size: 11px; font-weight: 600; pointer-events: none; }
+
 /* local or cloud */
 .split { display: flex; height: 22px; border-radius: 6px; overflow: hidden; margin: 6px 0 10px; background: var(--line); }
 .split > div { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 12px; font-weight: 600; min-width: 2px; white-space: nowrap; overflow: hidden; }
