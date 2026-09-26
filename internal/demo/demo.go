@@ -69,11 +69,34 @@ func (g *Generator) Next() []model.Span {
 	var routerRoot *model.Span
 	if client == "editor" || client == "agent" {
 		rr := model.Span{TraceID: tid, SpanID: model.NewID(8), Service: "router", Name: "request", StartMS: t, EndMS: t, Status: "ok",
-			Attrs: model.Attrs{"client": client, "requested_model": "auto"}}
+			Attrs: model.Attrs{"client": client, "requested_model": "auto", "backend": "local", "provider": "ollama"}}
 		routerRoot = &rr
 		decide := g.between(1, 4)
+		rule := rules[rng.Intn(len(rules))]
+		// one request in six goes to the cloud: the router decides, the cloud answers, the gateway never sees it
+		if rng.Float64() < 0.17 {
+			rule = "ESC002 root cause"
+			rr.Attrs["backend"], rr.Attrs["provider"], rr.Attrs["model"] = "cloud", "anthropic", "claude-fable-5-1"
+			spans = append(spans, model.Span{TraceID: tid, SpanID: model.NewID(8), ParentID: rr.SpanID, Service: "router", Name: "decide",
+				StartMS: cursor, EndMS: cursor + decide, Status: "ok", Attrs: model.Attrs{"rule": rule, "backend": "cloud"}})
+			cursor += decide
+			promptTokens := []float64{800, 2500, 6000}[rng.Intn(3)]
+			completion := float64(rng.Intn(900) + 100)
+			upMS := int64(1500 + rng.Float64()*6000)
+			spans = append(spans, model.Span{TraceID: tid, SpanID: model.NewID(8), ParentID: rr.SpanID, Service: "anthropic", Name: "upstream",
+				StartMS: cursor, EndMS: cursor + upMS, Status: "ok", Attrs: model.Attrs{"model": "claude-fable-5-1", "backend": "cloud",
+					"prompt_tokens": promptTokens, "completion_tokens": completion, "ttft_ms": float64(g.between(600, 1400))}})
+			cursor += upMS
+			rr.EndMS = cursor + g.between(1, 3)
+			rr.Attrs["status_code"] = 200.0
+			rr.Attrs["prompt_tokens"], rr.Attrs["completion_tokens"] = promptTokens, completion
+			rr.Attrs["rule"] = rule
+			spans = append(spans, rr)
+			return spans
+		}
 		spans = append(spans, model.Span{TraceID: tid, SpanID: model.NewID(8), ParentID: rr.SpanID, Service: "router", Name: "decide",
-			StartMS: cursor, EndMS: cursor + decide, Status: "ok", Attrs: model.Attrs{"rule": rules[rng.Intn(len(rules))], "backend": "local"}})
+			StartMS: cursor, EndMS: cursor + decide, Status: "ok", Attrs: model.Attrs{"rule": rule, "backend": "local"}})
+		rr.Attrs["rule"] = rule
 		cursor += decide
 	}
 	wire := "openai"

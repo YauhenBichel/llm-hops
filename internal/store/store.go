@@ -357,6 +357,19 @@ type ModelStat struct {
 	ms        []int64
 }
 
+// BackendStat is where the requests went: local or cloud, and which provider and model.
+type BackendStat struct {
+	Backend          string `json:"backend"`  // local | cloud, or the value the sender used
+	Provider         string `json:"provider"` // ollama, anthropic, openai, ...
+	Requests         int    `json:"requests"`
+	Errors           int    `json:"errors"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	P50MS            int64  `json:"p50_ms"`
+	P95MS            int64  `json:"p95_ms"`
+	ms               []int64
+}
+
 // Bucket is requests per time bucket.
 type Bucket struct {
 	T int64 `json:"t"`
@@ -375,6 +388,7 @@ type Stats struct {
 	MaxMS         int64              `json:"max_ms"`
 	ModelSwitches int                `json:"model_switches"`
 	Approx        bool               `json:"approx"` // part of the window comes from daily rollups (percentiles weighted)
+	Backends      []BackendStat      `json:"backends"`
 	Hops          map[string]HopStat `json:"hops"`
 	Buckets       []Bucket           `json:"buckets"`
 	Models        []ModelStat        `json:"models"`
@@ -385,7 +399,8 @@ func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
 	if bucketMS < 1000 {
 		bucketMS = 1000
 	}
-	st := Stats{SinceMS: sinceMS, UntilMS: untilMS, BucketMS: bucketMS, Hops: map[string]HopStat{}, Buckets: []Bucket{}, Models: []ModelStat{}}
+	st := Stats{SinceMS: sinceMS, UntilMS: untilMS, BucketMS: bucketMS, Hops: map[string]HopStat{}, Buckets: []Bucket{}, Models: []ModelStat{}, Backends: []BackendStat{}}
+	perBackend := map[string]*BackendStat{}
 	rows, err := s.db.Query("SELECT start_ms, end_ms, status, attrs FROM traces WHERE start_ms >= ? AND start_ms < ? ORDER BY start_ms", sinceMS, untilMS)
 	if err != nil {
 		return st, err
@@ -428,6 +443,39 @@ func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
 		}
 		b := (start / bucketMS) * bucketMS
 		buckets[b]++
+		// where it went: a router says local or cloud; a gateway line is local by definition
+		be := attrString(attrs, "backend")
+		provider := attrString(attrs, "provider")
+		switch be {
+		case "local", "cloud":
+		case "":
+			be = "local"
+		default: // a gateway's backend name (ollama, cpu, audio ...) is the provider of a local request
+			if provider == "" {
+				provider = be
+			}
+			be = "local"
+		}
+		if provider == "" {
+			provider = "?"
+		}
+		bk := be + "/" + provider
+		bs := perBackend[bk]
+		if bs == nil {
+			bs = &BackendStat{Backend: be, Provider: provider}
+			perBackend[bk] = bs
+		}
+		bs.Requests++
+		if status == "error" {
+			bs.Errors++
+		}
+		bs.ms = append(bs.ms, d)
+		if v, ok := attrs["prompt_tokens"].(float64); ok {
+			bs.PromptTokens += int64(v)
+		}
+		if v, ok := attrs["completion_tokens"].(float64); ok {
+			bs.CompletionTokens += int64(v)
+		}
 		backend := attrString(attrs, "backend")
 		if (backend == "" || backend == "ollama") && m != "?" {
 			if prevModel != "" && m != prevModel {
@@ -475,6 +523,17 @@ func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
 		st.Models = append(st.Models, *r)
 	}
 	sort.Slice(st.Models, func(i, j int) bool { return st.Models[i].Requests > st.Models[j].Requests })
+	for _, b := range perBackend {
+		sort.Slice(b.ms, func(i, j int) bool { return b.ms[i] < b.ms[j] })
+		b.P50MS, b.P95MS = pct(b.ms, 0.5), pct(b.ms, 0.95)
+		st.Backends = append(st.Backends, *b)
+	}
+	sort.Slice(st.Backends, func(i, j int) bool {
+		if st.Backends[i].Backend != st.Backends[j].Backend {
+			return st.Backends[i].Backend < st.Backends[j].Backend // cloud before local
+		}
+		return st.Backends[i].Requests > st.Backends[j].Requests
+	})
 	if err := s.mergeDaily(&st, sinceMS, untilMS); err != nil {
 		return st, err
 	}

@@ -49,7 +49,7 @@
   const fmtTime = (ms) => { const d = new Date(ms); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
   const fmtDate = (ms) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const kind = (service) => service === "router" || service === "harness" ? "router" : service === "gateway" ? "gateway" :
-    ["ollama", "cpu", "audio", "speech", "comfyui", "backend", "model", "llama", "vllm"].some((k) => service.startsWith(k)) ? "backend" : "other";
+    ["ollama", "cpu", "audio", "speech", "comfyui", "backend", "model", "llama", "vllm", "anthropic", "openai", "cloud", "claude", "gemini", "mistral"].some((k) => service.startsWith(k)) ? "backend" : "other";
   const colorOf = (service) => `var(--${kind(service)})`;
   const modelOf = (t) => t.attrs.model || t.attrs.requested_model || "?";
 
@@ -257,6 +257,23 @@
       kpi(String(st.model_switches), "model switches", st.model_switches > 20 ? "warn" : ""));
   };
 
+  const renderSplit = (st) => {
+    const bar = $("#split"), body = $("#backends tbody");
+    const total = st.requests || 0;
+    const byKind = { local: 0, cloud: 0 };
+    for (const b of st.backends || []) byKind[b.backend === "cloud" ? "cloud" : "local"] += b.requests;
+    bar.className = "split" + (total ? "" : " empty");
+    bar.replaceChildren(...["local", "cloud"].filter((k) => byKind[k]).map((k) => {
+      const pct = Math.round(100 * byKind[k] / total);
+      return withTip(el("div", { class: k, style: `flex: ${byKind[k]} 0 0`, text: pct >= 8 ? `${k} ${pct} %` : "" }), [[k, `${byKind[k]} requests, ${pct} %`]]);
+    }));
+    body.replaceChildren(...(st.backends || []).map((b) => el("tr", {}, el("td", {}, el("span", { class: "sw", style: `--c: var(--${b.backend === "cloud" ? "backend" : "gateway"})` }), b.backend),
+      el("td", { text: b.provider }), el("td", { class: "num", text: String(b.requests) }), el("td", { class: "num", text: String(b.errors) }),
+      el("td", { class: "num", text: b.prompt_tokens.toLocaleString() }), el("td", { class: "num", text: b.completion_tokens.toLocaleString() }),
+      el("td", { class: "num", text: fmtMs(b.p50_ms) }), el("td", { class: "num", text: fmtMs(b.p95_ms) }))));
+    const cloudTok = (st.backends || []).filter((b) => b.backend === "cloud").reduce((a, b) => a + b.prompt_tokens + b.completion_tokens, 0);
+    $("#split-caption").textContent = total ? `${byKind.local} local and ${byKind.cloud} cloud requests in the window; ${cloudTok.toLocaleString()} tokens went to the cloud.` : "Nothing in this window.";
+  };
   const renderRpm = (st) => {
     const target = $("#rpm-chart");
     const buckets = st.buckets;
@@ -459,7 +476,7 @@
       if (state.view === "flow") {
         const [flow, st, traces] = await Promise.all([api("/api/v1/flow", w), api("/api/v1/stats", { ...w, bucket_ms: bucketFor() }),
           api("/api/v1/traces", { since: w.since, limit: 10 })]);
-        renderFlow(flow); renderKpis($("#flow-kpis"), st); renderTicker(traces.traces);
+        renderFlow(flow); renderKpis($("#flow-kpis"), st); renderSplit(st); renderTicker(traces.traces);
       } else if (state.view === "traces") {
         const [traces, facets] = await Promise.all([api("/api/v1/traces", { since: w.since, limit: 500, model: state.filters.model, client: state.filters.client,
           service: state.filters.service, status: state.filters.status, min_ms: state.filters.min, q: state.q }), api("/api/v1/facets", w)]);

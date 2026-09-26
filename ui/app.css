@@ -156,3 +156,10 @@ table.small th, table.small td { padding: 5px 8px; font-size: 13px; }
 .tip { position: fixed; z-index: 20; background: var(--ink); color: var(--bg); padding: 6px 9px; border-radius: 6px; font-size: 12px; pointer-events: none; max-width: 320px; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
 .tip[hidden] { display: none; }
 .tip b { color: inherit; }
+
+/* local or cloud */
+.split { display: flex; height: 22px; border-radius: 6px; overflow: hidden; margin: 6px 0 10px; background: var(--line); }
+.split > div { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 12px; font-weight: 600; min-width: 2px; white-space: nowrap; overflow: hidden; }
+.split .local { background: var(--gateway); }
+.split .cloud { background: var(--backend); }
+.split.empty { background: var(--line); }
