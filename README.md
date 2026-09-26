@@ -103,6 +103,12 @@ program that unloaded the model once a minute, a prompt that was cut silently. T
 picture was not. llm-hops is the picture. The system it was built for is described in
 [yserver-local-llm-system](https://github.com/YauhenBichel/yserver-local-llm-system).
 
+## Where it is going
+
+Seven milestones, each task with its "done when", in [docs/ROADMAP.md](docs/ROADMAP.md); the tasks are the
+issues with a milestone label. The two that open the door to other systems come first: an OpenTelemetry
+receiver and a proxy mode that needs no log at all.
+
 ## Licence
 
 Apache-2.0. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
