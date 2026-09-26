@@ -49,7 +49,7 @@
   const fmtTime = (ms) => { const d = new Date(ms); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
   const fmtDate = (ms) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const kind = (service) => service === "router" || service === "harness" ? "router" : service === "gateway" ? "gateway" :
-    ["ollama", "cpu", "audio", "speech", "comfyui", "backend", "model", "llama", "vllm"].some((k) => service.startsWith(k)) ? "backend" : "other";
+    ["ollama", "cpu", "audio", "speech", "comfyui", "backend", "model", "llama", "vllm", "anthropic", "openai", "cloud", "claude", "gemini", "mistral"].some((k) => service.startsWith(k)) ? "backend" : "other";
   const colorOf = (service) => `var(--${kind(service)})`;
   const modelOf = (t) => t.attrs.model || t.attrs.requested_model || "?";
 
