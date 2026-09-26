@@ -65,7 +65,7 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(schema + rollupSchema); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -374,6 +374,7 @@ type Stats struct {
 	P95MS         int64              `json:"p95_ms"`
 	MaxMS         int64              `json:"max_ms"`
 	ModelSwitches int                `json:"model_switches"`
+	Approx        bool               `json:"approx"` // part of the window comes from daily rollups (percentiles weighted)
 	Hops          map[string]HopStat `json:"hops"`
 	Buckets       []Bucket           `json:"buckets"`
 	Models        []ModelStat        `json:"models"`
@@ -474,6 +475,9 @@ func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
 		st.Models = append(st.Models, *r)
 	}
 	sort.Slice(st.Models, func(i, j int) bool { return st.Models[i].Requests > st.Models[j].Requests })
+	if err := s.mergeDaily(&st, sinceMS, untilMS); err != nil {
+		return st, err
+	}
 	return st, nil
 }
 
