@@ -33,6 +33,7 @@ import (
 	"github.com/YauhenBichel/llm-hops/internal/adapters/yllmgateway"
 	"github.com/YauhenBichel/llm-hops/internal/config"
 	"github.com/YauhenBichel/llm-hops/internal/demo"
+	"github.com/YauhenBichel/llm-hops/internal/mcp"
 	"github.com/YauhenBichel/llm-hops/internal/model"
 	"github.com/YauhenBichel/llm-hops/internal/server"
 	"github.com/YauhenBichel/llm-hops/internal/store"
@@ -65,6 +66,8 @@ func main() {
 		err = demoCmd(os.Args[2:])
 	case "bench":
 		err = bench(os.Args[2:])
+	case "mcp":
+		err = mcpCmd(os.Args[2:])
 	case "config":
 		fmt.Print(config.Example)
 	case "version", "-v", "--version":
@@ -89,6 +92,7 @@ func usage() {
   llm-hops export [-db hops.db] [-since MS] [-until MS]    every span as JSON lines, oldest first
   llm-hops demo   [-to http://127.0.0.1:11602] [-n 300] [-live]
   llm-hops bench  [-to http://127.0.0.1:11602] [-rate 10000] [-seconds 10]
+  llm-hops mcp    [-to http://127.0.0.1:11602]             a Model Context Protocol server over stdio (Claude Code, Cursor, ...)
   llm-hops config                                          print an example configuration file
   llm-hops version
 
@@ -406,6 +410,18 @@ func demoCmd(args []string) error {
 			c.post(g.Next())
 		}
 	}
+}
+
+// mcpCmd serves the Model Context Protocol over stdin and stdout, against a running llm-hops server.
+func mcpCmd(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	c := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	log.SetOutput(os.Stderr)
+	s := &mcp.Server{Base: c.to, Token: c.token, Version: version}
+	return s.Serve(os.Stdin, os.Stdout)
 }
 
 // bench posts synthetic traces at a target rate of spans per second and reports what the server accepted.
