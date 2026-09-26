@@ -39,7 +39,7 @@ import (
 	"github.com/YauhenBichel/llm-hops/internal/store"
 )
 
-var version = "0.2.0-dev"
+var version = "dev" // set by the Makefile from the git tag
 
 type multi []string
 
