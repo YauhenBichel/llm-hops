@@ -330,6 +330,48 @@
       el("td", { class: "num", text: m.tokens_out.toLocaleString() }))));
   };
 
+  // ---- the model timeline -----------------------------------------------------------------------------
+  const MODEL_COLORS = ["#2a78d6", "#d97757", "#6b5bd2", "#2f8f5b", "#c9821b", "#7a8794", "#c8412f", "#3c8f7a"];
+  const modelColor = (() => { const seen = new Map(); return (m) => { if (!seen.has(m)) seen.set(m, MODEL_COLORS[seen.size % MODEL_COLORS.length]); return seen.get(m); }; })();
+  const renderTimeline = (data) => {
+    const target = $("#timeline"), legend = $("#timeline-legend");
+    const t0 = data.since_ms, t1 = Math.min(data.until_ms, Date.now());
+    const loads = data.loads || [];
+    if (!loads.length) { target.replaceChildren(el("p", { class: "muted", text: "No model loads in this window (the model server's log is not followed, or nothing was loaded)." })); legend.replaceChildren(); return; }
+    const W = 1200, H = 62, L = 8, R = 8, T = 6, bandY = 14, bandH = 22;
+    const x = (t) => L + Math.max(0, Math.min(1, (t - t0) / (t1 - t0))) * (W - L - R);
+    const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Which model was loaded when" });
+    const models = new Set();
+    let switches = 0;
+    loads.forEach((l, i) => {
+      const next = loads[i + 1];
+      const from = Math.max(l.end_ms, t0), to = next ? Math.max(next.start_ms, from) : t1;
+      models.add(l.model);
+      if (i > 0 && loads[i - 1].model !== l.model) switches++;
+      if (to > from) {
+        const g = svg("g");
+        const band = svg("rect", { class: "band", x: x(from), y: bandY, width: Math.max(1, x(to) - x(from)), height: bandH, fill: modelColor(l.model), rx: 3 });
+        withTip(band, [[l.model, `loaded ${fmtTime(l.start_ms)} in ${fmtMs(l.end_ms - l.start_ms)}, in the GPU ${fmtMs(to - from)}`]]);
+        g.append(band);
+        if (x(to) - x(from) > l.model.length * 6.5 + 10) g.append(svg("text", { class: "band-label", x: x(from) + 6, y: bandY + 15, text: l.model }));
+        root.append(g);
+      }
+      if (l.start_ms >= t0) {
+        const m = svg("rect", { class: "loadmark", x: x(l.start_ms), y: bandY - 4, width: Math.max(1.5, x(l.end_ms) - x(l.start_ms)), height: bandH + 8, rx: 1 });
+        withTip(m, [[`load ${l.model}`, `${fmtTime(l.start_ms)}, ${fmtMs(l.end_ms - l.start_ms)}`]]);
+        root.append(m);
+      }
+    });
+    for (const f of [0, .25, .5, .75, 1]) {
+      const t = t0 + (t1 - t0) * f;
+      root.append(svg("text", { class: "axis", x: x(t), y: H - 6, "text-anchor": f === 0 ? "start" : f === 1 ? "end" : "middle", text: fmtTime(t) }));
+    }
+    target.replaceChildren(root);
+    legend.replaceChildren(...[...models].map((m) => el("span", { text: m, style: `--c: ${modelColor(m)}` })));
+    const inWindow = loads.filter((l) => l.start_ms >= t0).length;
+    $("#timeline-caption").textContent = `${inWindow} load${inWindow === 1 ? "" : "s"} and ${switches} switch${switches === 1 ? "" : "es"} in the window; a dark mark is a load, the band after it is the model in the GPU until the next load.`;
+  };
+
   // ---- traces table -----------------------------------------------------------------------------------
   const tbody = $("#traces tbody");
   const hopBar = (t) => {
@@ -479,9 +521,9 @@
           api("/api/v1/traces", { since: w.since, limit: 10 })]);
         renderFlow(flow); renderKpis($("#flow-kpis"), st); renderSplit(st); renderTicker(traces.traces);
       } else if (state.view === "traces") {
-        const [traces, facets] = await Promise.all([api("/api/v1/traces", { since: w.since, limit: 500, model: state.filters.model, client: state.filters.client,
-          service: state.filters.service, status: state.filters.status, min_ms: state.filters.min, q: state.q }), api("/api/v1/facets", w)]);
-        renderFacets(facets); renderTraces(traces.traces);
+        const [traces, facets, loads] = await Promise.all([api("/api/v1/traces", { since: w.since, limit: 500, model: state.filters.model, client: state.filters.client,
+          service: state.filters.service, status: state.filters.status, min_ms: state.filters.min, q: state.q }), api("/api/v1/facets", w), api("/api/v1/loads", w)]);
+        renderFacets(facets); renderTraces(traces.traces); renderTimeline(loads);
       } else {
         const st = await api("/api/v1/stats", { ...w, bucket_ms: bucketFor() });
         state.stats = st; renderKpis($("#stats-kpis"), st); renderRpm(st); renderHopTable(st); renderModelTable(st);

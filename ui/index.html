@@ -59,6 +59,11 @@
   </section>
 
   <section id="view-traces" class="view" role="tabpanel" hidden>
+    <div class="panel">
+      <div class="panel-head"><h2>Which model was loaded</h2><p class="muted" id="timeline-caption">Every model load from the model server's log, and what sat in the GPU between loads. Hover a band.</p></div>
+      <div id="timeline" class="chart timeline"></div>
+      <div class="legend" id="timeline-legend"></div>
+    </div>
     <div class="filters" id="filters">
       <label>Model <select id="f-model"><option value="">all</option></select></label>
       <label>Client <select id="f-client"><option value="">all</option></select></label>

@@ -62,3 +62,36 @@ func TestLoadsAreCountedAndNotRequests(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 }
+
+func TestLoadsIncludeTheOneBeforeTheWindow(t *testing.T) {
+	s := open(t)
+	mk := func(id, m string, a, b int64) model.Span {
+		return model.Span{TraceID: id, SpanID: id, Service: "ollama", Name: "load", StartMS: a, EndMS: b, Status: "ok", Attrs: model.Attrs{"model": m, "kind": "load"}}
+	}
+	s.Add([]model.Span{mk("a", "x", 100, 200), mk("b", "y", 1000, 1100), mk("c", "x", 5000, 5100), mk("d", "z", 9000, 9100)})
+	loads, err := s.Loads(2000, 8000)
+	if err != nil || len(loads) != 2 || loads[0].Model != "y" || loads[1].Model != "x" {
+		t.Fatalf("%+v %v", loads, err)
+	}
+	loads, _ = s.Loads(50, 8000)
+	if len(loads) != 3 {
+		t.Fatalf("%+v", loads)
+	}
+}
+
+func TestTracesListLeavesLoadsOutUnlessAsked(t *testing.T) {
+	s := open(t)
+	s.Add([]model.Span{
+		{TraceID: "r", SpanID: "r", Service: "gateway", Name: "request", StartMS: 1, EndMS: 2, Status: "ok", Attrs: model.Attrs{"model": "m"}},
+		{TraceID: "l", SpanID: "l", Service: "ollama", Name: "load", StartMS: 1, EndMS: 2, Status: "ok", Attrs: model.Attrs{"model": "m", "kind": "load"}},
+	})
+	if rows, _ := s.Traces(Filter{}); len(rows) != 1 || rows[0].TraceID != "r" {
+		t.Fatalf("default: %+v", rows)
+	}
+	if rows, _ := s.Traces(Filter{Kind: "load"}); len(rows) != 1 || rows[0].TraceID != "l" {
+		t.Fatalf("load: %+v", rows)
+	}
+	if rows, _ := s.Traces(Filter{Kind: "any"}); len(rows) != 2 {
+		t.Fatalf("any: %+v", rows)
+	}
+}

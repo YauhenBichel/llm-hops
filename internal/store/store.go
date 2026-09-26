@@ -237,6 +237,7 @@ type Filter struct {
 	Model, Service    string
 	Status, Client, Q string
 	MinMS             *int64
+	Kind              string // "" = requests only (no loads or unloads); "load"; "any"
 }
 
 // Traces lists trace summaries, newest first.
@@ -270,6 +271,14 @@ func (s *Store) Traces(f Filter) ([]model.TraceSummary, error) {
 	if f.Client != "" {
 		where = append(where, "json_extract(attrs, '$.client') = ?")
 		args = append(args, f.Client)
+	}
+	switch f.Kind {
+	case "", "request":
+		where = append(where, "json_extract(attrs, '$.kind') IS NULL")
+	case "any":
+	default:
+		where = append(where, "json_extract(attrs, '$.kind') = ?")
+		args = append(args, f.Kind)
 	}
 	if f.Q != "" {
 		where = append(where, "(attrs LIKE ? OR name LIKE ? OR trace_id LIKE ?)")
@@ -652,6 +661,40 @@ func (s *Store) Facets(sinceMS, untilMS int64) (map[string][]string, error) {
 	}
 	out["service"] = svcs
 	return out, nil
+}
+
+// Load is one model load from Ollama's journal, as the timeline draws it.
+type Load struct {
+	Model   string `json:"model"`
+	StartMS int64  `json:"start_ms"`
+	EndMS   int64  `json:"end_ms"`
+}
+
+// Loads lists the model loads in a window, oldest first, plus the last one before it (what was loaded
+// when the window opened).
+func (s *Store) Loads(sinceMS, untilMS int64) ([]Load, error) {
+	rows, err := s.db.Query("SELECT start_ms, end_ms, json_extract(attrs, '$.model') FROM traces "+
+		"WHERE json_extract(attrs, '$.kind') = 'load' AND start_ms < ? AND (start_ms >= ? OR start_ms = "+
+		"(SELECT max(start_ms) FROM traces WHERE json_extract(attrs, '$.kind') = 'load' AND start_ms < ?)) ORDER BY start_ms",
+		untilMS, sinceMS, sinceMS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Load{}
+	for rows.Next() {
+		var l Load
+		var m sql.NullString
+		if err := rows.Scan(&l.StartMS, &l.EndMS, &m); err != nil {
+			return nil, err
+		}
+		l.Model = m.String
+		if l.Model == "" {
+			l.Model = "?"
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }
 
 func attrString(a model.Attrs, k string) string {
