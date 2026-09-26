@@ -52,7 +52,8 @@ type TraceSummary struct {
 
 // SummaryAttrs are the root span's attributes the list view filters and shows; the rest stay on the span.
 var SummaryAttrs = []string{"client", "wire", "role", "model", "requested_model", "backend", "provider", "stream", "status_code",
-	"prompt_tokens", "completion_tokens", "tok_per_s", "error", "rule", "locked", "queue_ms", "ttft_ms", "prompt_chars"}
+	"prompt_tokens", "completion_tokens", "tok_per_s", "error", "rule", "locked", "queue_ms", "ttft_ms", "prompt_chars",
+	"kind", "load_ms", "blob"}
 
 // NewID returns n random bytes as hex.
 func NewID(n int) string {

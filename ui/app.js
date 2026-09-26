@@ -254,7 +254,8 @@
       kpi(`${errPct.toFixed(errPct < 10 ? 1 : 0)} %`, `errors (${st.errors})`, errPct > 5 ? "bad" : errPct > 1 ? "warn" : ""),
       kpi(fmtMs(st.p50_ms), "median request"),
       kpi(fmtMs(st.p95_ms), "95th percentile", st.p95_ms > 30000 ? "warn" : ""),
-      kpi(String(st.model_switches), "model switches", st.model_switches > 20 ? "warn" : ""));
+      kpi(String(st.model_switches), "model switches", st.model_switches > 20 ? "warn" : ""),
+      kpi(st.loads ? `${st.loads} · ${fmtMs(st.load_ms)}` : "0", "model loads · time loading", st.load_ms > 600000 ? "warn" : ""));
   };
 
   const renderSplit = (st) => {

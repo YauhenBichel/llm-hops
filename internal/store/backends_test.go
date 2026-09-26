@@ -49,3 +49,16 @@ func TestBackendsSplitLocalFromCloud(t *testing.T) {
 		t.Fatalf("cpu: %+v", cpu)
 	}
 }
+
+func TestLoadsAreCountedAndNotRequests(t *testing.T) {
+	s := open(t)
+	s.Add([]model.Span{
+		{TraceID: "r1", SpanID: "root", Service: "gateway", Name: "request", StartMS: 1000, EndMS: 2000, Status: "ok", Attrs: model.Attrs{"model": "m"}},
+		{TraceID: "l1", SpanID: "l1", Service: "ollama", Name: "load", StartMS: 1000, EndMS: 31000, Status: "ok", Attrs: model.Attrs{"model": "m", "kind": "load", "load_ms": 30000.0}},
+		{TraceID: "l2", SpanID: "l2", Service: "ollama", Name: "load", StartMS: 40000, EndMS: 50000, Status: "ok", Attrs: model.Attrs{"model": "n", "kind": "load"}},
+	})
+	st, _ := s.Stats(0, 100000, 60000)
+	if st.Requests != 1 || st.Loads != 2 || st.LoadMS != 40000 || st.P50MS != 1000 {
+		t.Fatalf("%+v", st)
+	}
+}

@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/YauhenBichel/llm-hops/internal/adapters/ollama"
 	"github.com/YauhenBichel/llm-hops/internal/adapters/yllmgateway"
 	"github.com/YauhenBichel/llm-hops/internal/config"
 	"github.com/YauhenBichel/llm-hops/internal/demo"
@@ -86,7 +87,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `llm-hops: see every hop of a request through your local LLM system.
 
-  llm-hops serve  [-config hops.toml] [-db hops.db] [-listen 127.0.0.1:11602] [-tail FILE]... [-from-start] [-demo N] [-live] [-keep-days 14]
+  llm-hops serve  [-config hops.toml] [-db hops.db] [-listen 127.0.0.1:11602] [-tail FILE]... [-from-start] [-ollama-journal] [-demo N] [-live] [-keep-days 14]
   llm-hops tail   FILE [-to http://127.0.0.1:11602] [-from-start]
   llm-hops import FILE [-to http://127.0.0.1:11602]        a yllm-gateway request log, or an llm-hops export
   llm-hops export [-db hops.db] [-since MS] [-until MS]    every span as JSON lines, oldest first
@@ -111,6 +112,7 @@ func loadConfig(fs *flag.FlagSet, args []string) (config.Config, error) {
 	live := fs.Bool("live", false, "with -demo: keep adding one trace a second")
 	keepDays := fs.Float64("keep-days", 0, "spans older than this become daily statistics")
 	title := fs.String("title", "", "the page's title")
+	ollamaJournal := fs.Bool("ollama-journal", false, "follow journalctl -u ollama: every model load becomes a trace")
 	if err := fs.Parse(args); err != nil {
 		return config.Config{}, err
 	}
@@ -136,6 +138,8 @@ func loadConfig(fs *flag.FlagSet, args []string) (config.Config, error) {
 			cfg.KeepDays = *keepDays
 		case "title":
 			cfg.Title = *title
+		case "ollama-journal":
+			cfg.OllamaJournal = *ollamaJournal
 		}
 	})
 	if cfg.KeepDays <= 0 {
@@ -202,6 +206,27 @@ func serve(args []string) error {
 			}
 		}(path)
 		log.Printf("following %s", path)
+	}
+	if cfg.OllamaJournal {
+		loads := make(chan []model.Span, 100)
+		ctx, cancelJournal := context.WithCancel(context.Background())
+		go func() {
+			<-stop
+			cancelJournal()
+		}()
+		go func() {
+			if err := ollama.Follow(ctx, "", &ollama.APINamer{Base: cfg.OllamaURL}, loads); err != nil && ctx.Err() == nil {
+				log.Printf("ollama journal: %v", err)
+			}
+		}()
+		go func() {
+			for spans := range loads {
+				if touched, err := st.Add(spans); err == nil {
+					srv.Publish(touched)
+				}
+			}
+		}()
+		log.Printf("following journalctl -u ollama for model loads")
 	}
 	if cfg.Demo > 0 && cfg.Live {
 		go func() {

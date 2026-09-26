@@ -14,20 +14,22 @@ import (
 
 // Config is everything `llm-hops serve` needs.
 type Config struct {
-	Listen    string   `toml:"listen"`     // address to listen on
-	DB        string   `toml:"db"`         // the SQLite file
-	KeepDays  float64  `toml:"keep_days"`  // spans older than this are rolled up into daily statistics and dropped
-	Tail      []string `toml:"tail"`       // yllm-gateway request logs to follow
-	FromStart bool     `toml:"from_start"` // read the whole log first, then follow
-	Token     string   `toml:"token"`      // when set, the API and the page need it (bearer header or cookie)
-	Title     string   `toml:"title"`      // the page's title
-	Demo      int      `toml:"demo"`       // synthetic traces to load at start
-	Live      bool     `toml:"live"`       // with demo: keep adding one trace a second
+	Listen        string   `toml:"listen"`         // address to listen on
+	DB            string   `toml:"db"`             // the SQLite file
+	KeepDays      float64  `toml:"keep_days"`      // spans older than this are rolled up into daily statistics and dropped
+	Tail          []string `toml:"tail"`           // yllm-gateway request logs to follow
+	FromStart     bool     `toml:"from_start"`     // read the whole log first, then follow
+	Token         string   `toml:"token"`          // when set, the API and the page need it (bearer header or cookie)
+	Title         string   `toml:"title"`          // the page's title
+	OllamaJournal bool     `toml:"ollama_journal"` // follow journalctl -u ollama for model loads
+	OllamaURL     string   `toml:"ollama_url"`     // to name the loaded blobs (default http://127.0.0.1:11434)
+	Demo          int      `toml:"demo"`           // synthetic traces to load at start
+	Live          bool     `toml:"live"`           // with demo: keep adding one trace a second
 }
 
 // Default is what runs with no file and no flags.
 func Default() Config {
-	return Config{Listen: "127.0.0.1:11602", DB: "hops.db", KeepDays: 14, Title: "llm-hops"}
+	return Config{Listen: "127.0.0.1:11602", DB: "hops.db", KeepDays: 14, Title: "llm-hops", OllamaURL: "http://127.0.0.1:11434"}
 }
 
 // Load reads path over the defaults; a missing path with `must` false is not an error.
@@ -70,6 +72,8 @@ db = "hops.db"
 keep_days = 14            # spans older than this become daily statistics and are dropped
 tail = []                 # yllm-gateway request logs to follow, e.g. ["/home/me/yllm-gateway/var/requests.jsonl"]
 from_start = false        # read the whole log first, then follow
+ollama_journal = false    # follow journalctl -u ollama on this machine: every model load becomes a trace
+ollama_url = "http://127.0.0.1:11434"   # to name the loaded models
 # token = "..."           # when set, POST /api/v1/spans, the API and the page need it
                           # (Authorization: Bearer, or open the page once as /#token=...); LLM_HOPS_TOKEN overrides
 title = "llm-hops"
