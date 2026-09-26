@@ -285,7 +285,9 @@
       root.append(svg("text", { class: "axis", x: x(t), y: H - 8, "text-anchor": f === 0 ? "start" : f === 1 ? "end" : "middle", text: fmtTime(t) }));
     }
     target.replaceChildren(root);
-    $("#rpm-caption").textContent = `${st.requests} requests in ${Math.round((t1 - t0) / 60000)} minutes; buckets of ${Math.round(bw / 60000)} min.`;
+    const bucketText = bw >= 3600000 ? `${Math.round(bw / 3600000)} h` : `${Math.round(bw / 60000)} min`;
+    $("#rpm-title").textContent = `Requests per ${bucketText === "1 min" ? "minute" : bucketText}`;
+    $("#rpm-caption").textContent = `${st.requests} requests in the window, ${Math.round((t1 - t0) / 3600000)} hours; one bar per ${bucketText}.`;
   };
 
   const renderHopTable = (st) => {
