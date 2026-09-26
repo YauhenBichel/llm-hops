@@ -9,9 +9,10 @@
 //	    first token at ttft_ms      as an attribute, drawn as a marker
 //	  reply (gateway)               the rest, if the total is longer than queue + upstream
 //
-// The log's ts has second resolution; the durations are milliseconds. So every span in a trace is placed
-// exactly relative to the request's start, and the start itself is known to the second. The trace id is a
-// hash of the line, so following the same file twice produces the same traces, never duplicates.
+// The durations are milliseconds; ts carries milliseconds since 26 September 2026 and seconds before. When
+// the line carries a trace_id (the gateway since the same day), the spans use it, with the root span's id
+// the trace id's first half: the same ids the gateway posts directly, so a trace fed both ways merges.
+// Without one, the trace id is a hash of the line, so following the same file twice never duplicates.
 //
 // The line's fields (yllm-gateway, September 2026): ts, wire, path, client, requested_model, served_model,
 // role, route, backend, memory, stream, status, queue_ms, upstream_ms, ttft_ms, total_ms, prompt_tokens,
@@ -57,8 +58,14 @@ func LineToSpans(line string) []model.Span {
 	if !ok {
 		return nil
 	}
-	sum := sha1.Sum([]byte(line)) //nolint:gosec // an identifier, not a secret
-	tid := hex.EncodeToString(sum[:])[:32]
+	tid, _ := rec["trace_id"].(string)
+	rootID := "root"
+	if len(tid) >= 16 {
+		rootID = tid[:16]
+	} else {
+		sum := sha1.Sum([]byte(line)) //nolint:gosec // an identifier, not a secret
+		tid = hex.EncodeToString(sum[:])[:32]
+	}
 	total := num(rec["total_ms"])
 	queue := num(rec["queue_ms"])
 	upstream, hasUpstream := rec["upstream_ms"].(float64)
@@ -78,10 +85,10 @@ func LineToSpans(line string) []model.Span {
 	attrs["model"] = modelName
 	attrs["status_code"] = float64(statusCode)
 	end := start + max(total, queue+int64(upstream))
-	spans := []model.Span{{TraceID: tid, SpanID: "root", Service: Service, Name: "request", StartMS: start, EndMS: end, Status: status, Attrs: attrs}}
+	spans := []model.Span{{TraceID: tid, SpanID: rootID, Service: Service, Name: "request", StartMS: start, EndMS: end, Status: status, Attrs: attrs}}
 	t := start
 	if queue > 0 {
-		spans = append(spans, model.Span{TraceID: tid, SpanID: "queue", ParentID: "root", Service: Service, Name: "queue",
+		spans = append(spans, model.Span{TraceID: tid, SpanID: "queue", ParentID: rootID, Service: Service, Name: "queue",
 			StartMS: t, EndMS: t + queue, Status: "ok", Attrs: model.Attrs{"queue_ms": float64(queue)}})
 	}
 	t += queue
@@ -101,16 +108,16 @@ func LineToSpans(line string) []model.Span {
 		if errKind != "" {
 			up["error"] = errKind
 		}
-		spans = append(spans, model.Span{TraceID: tid, SpanID: "upstream", ParentID: "root", Service: backend, Name: "upstream",
+		spans = append(spans, model.Span{TraceID: tid, SpanID: "upstream", ParentID: rootID, Service: backend, Name: "upstream",
 			StartMS: t, EndMS: t + int64(upstream), Status: upStatus, Attrs: up})
 		t += int64(upstream)
 	}
 	if errKind == "context_length" {
-		spans = append(spans, model.Span{TraceID: tid, SpanID: "check", ParentID: "root", Service: Service, Name: "check",
+		spans = append(spans, model.Span{TraceID: tid, SpanID: "check", ParentID: rootID, Service: Service, Name: "check",
 			StartMS: start + queue, EndMS: start + queue + 1, Status: "error", Attrs: model.Attrs{"error": "context_length"}})
 	}
 	if total > (t-start)+1 {
-		spans = append(spans, model.Span{TraceID: tid, SpanID: "reply", ParentID: "root", Service: Service, Name: "reply",
+		spans = append(spans, model.Span{TraceID: tid, SpanID: "reply", ParentID: rootID, Service: Service, Name: "reply",
 			StartMS: t, EndMS: start + total, Status: "ok", Attrs: model.Attrs{}})
 	}
 	return spans

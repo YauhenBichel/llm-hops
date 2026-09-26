@@ -163,3 +163,20 @@ func TestFollowSeesAppendsAndSurvivesRotation(t *testing.T) {
 		t.Fatal("nothing after rotation")
 	}
 }
+
+func TestALineWithATraceIDUsesItAndTheGatewaysSpanIDs(t *testing.T) {
+	line := `{"ts":"2026-09-26T15:42:25.291Z","wire":"openai","path":"/v1/chat/completions","client":"127.0.0.1","requested_model":"role:coder","served_model":"qwen3-coder-next","role":"coder","backend":"ollama","stream":false,"status":200,"queue_ms":10,"upstream_ms":500,"ttft_ms":null,"total_ms":520,"prompt_tokens":5,"completion_tokens":3,"tok_per_s":6.0,"fallback":false,"error":null,"key_id":"anon","trace_id":"0123456789abcdef0123456789abcdef"}`
+	spans := LineToSpans(line)
+	if spans[0].TraceID != "0123456789abcdef0123456789abcdef" || spans[0].SpanID != "0123456789abcdef" {
+		t.Fatalf("root: %+v", spans[0])
+	}
+	if spans[0].StartMS != time.Date(2026, 9, 26, 15, 42, 25, 291_000_000, time.UTC).UnixMilli() {
+		t.Fatalf("the milliseconds of ts were lost: %d", spans[0].StartMS)
+	}
+	for _, s := range spans[1:] {
+		if s.ParentID != "0123456789abcdef" {
+			t.Fatalf("child parent: %+v", s)
+		}
+	}
+}
+
