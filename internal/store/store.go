@@ -77,7 +77,13 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Add inserts spans (a repeat of the same span replaces it) and refreshes the summaries of the traces
 // they touch. It returns the trace ids touched, sorted, for the live stream.
-func (s *Store) Add(spans []model.Span) ([]string, error) {
+func (s *Store) Add(spans []model.Span) ([]string, error) { return s.add(spans, true) }
+
+// AddIfAbsent inserts spans that are not there yet and leaves existing ones alone: for spans derived from
+// a log when the service may also post its own, exact ones, which must win whichever arrives first.
+func (s *Store) AddIfAbsent(spans []model.Span) ([]string, error) { return s.add(spans, false) }
+
+func (s *Store) add(spans []model.Span, replace bool) ([]string, error) {
 	if len(spans) == 0 {
 		return nil, nil
 	}
@@ -98,7 +104,11 @@ func (s *Store) Add(spans []model.Span) ([]string, error) {
 		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op after Commit
-	stmt, err := tx.Prepare("INSERT OR REPLACE INTO spans VALUES (?,?,?,?,?,?,?,?,?)")
+	verb := "REPLACE"
+	if !replace {
+		verb = "IGNORE"
+	}
+	stmt, err := tx.Prepare("INSERT OR " + verb + " INTO spans VALUES (?,?,?,?,?,?,?,?,?)")
 	if err != nil {
 		return nil, err
 	}

@@ -177,7 +177,7 @@ func serve(args []string) error {
 				if len(batch) == 0 {
 					return
 				}
-				touched, err := st.Add(batch)
+				touched, err := st.AddIfAbsent(batch) // the gateway's own spans, when it posts them, win
 				if err != nil {
 					log.Printf("tail %s: %v", path, err)
 				}
@@ -289,17 +289,17 @@ func tail(args []string) error {
 		case l := <-lines:
 			batch = append(batch, yllmgateway.LineToSpans(l)...)
 			if len(batch) >= 1000 {
-				c.post(batch)
+				c.postIfAbsent(batch)
 				batch = batch[:0]
 			}
 		case <-t.C:
 			if len(batch) > 0 {
-				c.post(batch)
+				c.postIfAbsent(batch)
 				batch = batch[:0]
 			}
 		case <-stop:
 			if len(batch) > 0 {
-				c.post(batch)
+				c.postIfAbsent(batch)
 			}
 			return nil
 		}
@@ -339,7 +339,7 @@ func importFile(args []string) error {
 	for sc.Scan() {
 		batch = append(batch, lineToSpans(sc.Text())...)
 		if len(batch) >= 2000 {
-			n += c.post(batch)
+			n += c.postIfAbsent(batch)
 			batch = batch[:0]
 		}
 	}
@@ -347,7 +347,7 @@ func importFile(args []string) error {
 		return err
 	}
 	if len(batch) > 0 {
-		n += c.post(batch)
+		n += c.postIfAbsent(batch)
 	}
 	log.Printf("imported %d traces", n)
 	return nil
@@ -468,8 +468,18 @@ func bench(args []string) error {
 }
 
 // post sends spans and returns the number of traces the server reports; it retries twice.
-func (c *client) post(spans []model.Span) int {
-	body, _ := json.Marshal(spans)
+func (c *client) post(spans []model.Span) int { return c.send(spans, false) }
+
+// postIfAbsent is post for log-derived spans: the server keeps what a service already posted itself.
+func (c *client) postIfAbsent(spans []model.Span) int { return c.send(spans, true) }
+
+func (c *client) send(spans []model.Span, ifAbsent bool) int {
+	var body []byte
+	if ifAbsent {
+		body, _ = json.Marshal(map[string]any{"spans": spans, "if_absent": true})
+	} else {
+		body, _ = json.Marshal(spans)
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		req, _ := http.NewRequest(http.MethodPost, strings.TrimRight(c.to, "/")+"/api/v1/spans", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

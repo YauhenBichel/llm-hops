@@ -131,15 +131,17 @@ func (s *Server) postSpans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var items []json.RawMessage
+	ifAbsent := false
 	if err := json.Unmarshal(body, &items); err != nil {
 		var wrapped struct {
-			Spans []json.RawMessage `json:"spans"`
+			Spans    []json.RawMessage `json:"spans"`
+			IfAbsent bool              `json:"if_absent"` // log-derived spans: never overwrite a service's own
 		}
 		if err2 := json.Unmarshal(body, &wrapped); err2 != nil || wrapped.Spans == nil {
-			http.Error(w, `send a JSON list of spans, or {"spans": [...]}`, http.StatusBadRequest)
+			http.Error(w, `send a JSON list of spans, or {"spans": [...], "if_absent": false}`, http.StatusBadRequest)
 			return
 		}
-		items = wrapped.Spans
+		items, ifAbsent = wrapped.Spans, wrapped.IfAbsent
 	}
 	if len(items) > maxBatch {
 		http.Error(w, fmt.Sprintf("at most %d spans per request", maxBatch), http.StatusRequestEntityTooLarge)
@@ -155,7 +157,12 @@ func (s *Server) postSpans(w http.ResponseWriter, r *http.Request) {
 		}
 		spans = append(spans, sp)
 	}
-	touched, err := s.Store.Add(spans)
+	var touched []string
+	if ifAbsent {
+		touched, err = s.Store.AddIfAbsent(spans)
+	} else {
+		touched, err = s.Store.Add(spans)
+	}
 	if err != nil {
 		http.Error(w, "store: "+err.Error(), http.StatusInternalServerError)
 		return
