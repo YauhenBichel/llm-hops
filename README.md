@@ -62,6 +62,19 @@ A span has a `service`, a `name`, a start and an end in milliseconds, a `status`
 names the page draws with meaning: `decide`, `check`, `queue`, `load`, `prefill`, `generate`, `upstream`,
 `reply`. Any other name is drawn as a plain hop.
 
+## Integrations
+
+Three doors other tools already know, all in [docs/integrations.md](docs/integrations.md):
+
+- **OpenTelemetry in**: point any OTel SDK's OTLP HTTP exporter (JSON encoding) at `/v1/traces`; GenAI
+  attributes map to the page's names, prompt text is dropped on arrival.
+- **Prometheus out**: `/metrics`, the last five minutes per hop and per model.
+- **MCP for assistants**: `claude mcp add llm-hops -- llm-hops mcp -to http://127.0.0.1:11602` gives Claude
+  Code, Cursor or any MCP client five read-only tools: stats, the slowest requests, a filtered list, one
+  request as a text waterfall, the flow.
+
+The HTTP API is described at `/api/openapi.json`.
+
 ## The API
 
 | Call | Gives |
