@@ -80,11 +80,20 @@ type Server struct {
 
 	spansReceived atomic.Int64
 	spansRejected atomic.Int64
+
+	closing   chan struct{}
+	closeOnce sync.Once
+}
+
+// CloseStreams ends every open event stream. http.Server.Shutdown waits for handlers to return and
+// a stream never returns by itself, so this is registered with RegisterOnShutdown.
+func (s *Server) CloseStreams() {
+	s.closeOnce.Do(func() { close(s.closing) })
 }
 
 // New wires the routes.
 func New(st *store.Store, bus *Broadcast) *Server {
-	s := &Server{Store: st, Bus: bus, Title: "llm-hops", started: time.Now(), mux: http.NewServeMux()}
+	s := &Server{Store: st, Bus: bus, Title: "llm-hops", started: time.Now(), mux: http.NewServeMux(), closing: make(chan struct{})}
 	s.mux.HandleFunc("POST /api/v1/spans", s.postSpans)
 	s.mux.HandleFunc("GET /api/v1/traces", s.getTraces)
 	s.mux.HandleFunc("GET /api/v1/traces/{id}", s.getTrace)
@@ -320,6 +329,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.closing:
 			return
 		case ev := <-ch:
 			fmt.Fprintf(w, "data: %s\n\n", ev)

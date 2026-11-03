@@ -258,22 +258,37 @@ func serve(args []string) error {
 		}
 	}()
 	h := &http.Server{Addr: cfg.Listen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
+	h.RegisterOnShutdown(srv.CloseStreams)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	go func() {
-		<-ctx.Done()
-		close(stop)
-		shutdown, c := context.WithTimeout(context.Background(), 5*time.Second)
-		defer c()
-		_ = h.Shutdown(shutdown)
-	}()
 	guarded := ""
 	if cfg.Token != "" {
 		guarded = ", a token is required"
 	}
 	log.Printf("llm-hops %s on http://%s/  (db %s, keep %.0f days%s)", version, cfg.Listen, cfg.DB, cfg.KeepDays, guarded)
-	if err := h.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	return serveUntil(ctx, h, stop, shutdownGrace)
+}
+
+// shutdownGrace is how long requests in flight get to finish after a signal.
+const shutdownGrace = 5 * time.Second
+
+// serveUntil serves until ctx ends, then closes stop and drains. ListenAndServe returns the moment
+// Shutdown begins, so it waits for Shutdown as well: returning earlier would end the process with
+// requests still running.
+func serveUntil(ctx context.Context, h *http.Server, stop chan struct{}, grace time.Duration) error {
+	drained := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		close(stop)
+		shutdown, c := context.WithTimeout(context.Background(), grace)
+		defer c()
+		drained <- h.Shutdown(shutdown)
+	}()
+	if err := h.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
+	}
+	if err := <-drained; err != nil {
+		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
 }

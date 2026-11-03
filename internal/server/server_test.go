@@ -6,6 +6,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -137,6 +138,34 @@ func TestStreamAnnouncesNewTraces(t *testing.T) {
 		}
 	}
 	t.Fatal("no event")
+}
+
+func TestCloseStreamsEndsAnOpenStream(t *testing.T) {
+	s, ts := newServer(t)
+	resp, err := http.Get(ts.URL + "/api/v1/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	rd := bufio.NewReader(resp.Body)
+	if _, err := rd.ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	s.CloseStreams()
+	s.CloseStreams() // a second call does no harm
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, rd)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("stream ended with %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stream stayed open after CloseStreams")
+	}
 }
 
 func TestPageAndAssets(t *testing.T) {
