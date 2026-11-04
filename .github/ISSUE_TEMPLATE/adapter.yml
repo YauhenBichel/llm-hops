@@ -1,0 +1,22 @@
+name: Adapter request
+description: Ask llm-hops to read another LLM server or log format
+labels: [adapter]
+body:
+  - type: input
+    id: system
+    attributes:
+      label: Which server or tool?
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: A sample of its log or span output
+      description: Remove hostnames, prompts, tokens and anything private first.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: hops
+    attributes:
+      label: Which hops should appear in a trace?

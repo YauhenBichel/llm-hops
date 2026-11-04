@@ -1,0 +1,22 @@
+name: Report from a different system
+description: Tell us how llm-hops behaves on your hardware and models
+labels: [report]
+body:
+  - type: textarea
+    id: system
+    attributes:
+      label: Your system
+      description: CPU or GPU, memory, operating system, model server and models.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What you measured
+      description: Numbers from hops stats or the page. Remove anything private first.
+    validations:
+      required: true
+  - type: textarea
+    id: surprise
+    attributes:
+      label: Anything surprising or missing?
