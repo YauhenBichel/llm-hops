@@ -19,3 +19,11 @@ make sdk-test         # ruff, mypy --strict, pytest for the Python SDK
 ```
 
 Keep prompts and completions out of everything: spans, tests, screenshots.
+
+## Releasing (maintainers)
+
+A tag `vX.Y.Z` on `main` starts `.github/workflows/release.yml`: GoReleaser (`.goreleaser.yaml`) builds linux
+and darwin binaries for amd64 and arm64 and puts them, with `checksums.txt`, on the GitHub release; then a
+pull request in [homebrew-tap](https://github.com/YauhenBichel/homebrew-tap) moves the formula to the tag.
+`make snapshot` builds the same files locally without publishing. The workflow needs the repository secret
+`HOMEBREW_TAP_TOKEN` and fails at its first step without it.

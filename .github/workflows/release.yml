@@ -1,0 +1,85 @@
+name: release
+
+# A tag vX.Y.Z builds the binaries for linux and darwin (amd64, arm64), puts them with checksums on the
+# GitHub release, and opens a pull request in the Homebrew tap that moves the formula to the new tag.
+# Nothing here runs on a branch push or a pull request.
+#
+# One-time setup by the owner: the repository secret HOMEBREW_TAP_TOKEN, a fine-grained personal access
+# token for YauhenBichel/homebrew-tap only, with Contents: read and write and Pull requests: read and write.
+# Without it the first job fails and says so, before anything is built or released.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The tap token is set
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::error::The secret HOMEBREW_TAP_TOKEN is not set, so the Homebrew formula could not be updated. Nothing was released. Add it (see the top of release.yml) and run this workflow again."
+            exit 1
+          fi
+
+  release:
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write              # to create the release and attach the files
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0           # the changelog needs the history
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  homebrew:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}      # not for v1.0.0-rc1
+    runs-on: ubuntu-latest
+    env:
+      TAP: YauhenBichel/homebrew-tap
+      FORMULA: Formula/llm-hops.rb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Point the formula at this tag
+        run: |
+          test -f "$FORMULA" || { echo "::error::$TAP has no $FORMULA yet: merge the pull request that adds it, then run this job again."; exit 1; }
+          url="https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
+          sha=$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)
+          sed -i -E "s|^  url \".*\"$|  url \"$url\"|; s|^  sha256 \".*\"$|  sha256 \"$sha\"|" "$FORMULA"
+          grep -q "$sha" "$FORMULA" || { echo "::error::could not rewrite url and sha256 in $FORMULA"; exit 1; }
+          git diff --quiet && { echo "::notice::the formula already names $GITHUB_REF_NAME"; exit 0; }
+          ruby -c "$FORMULA"
+      - name: Open the pull request in the tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git diff --quiet && exit 0
+          version="${GITHUB_REF_NAME#v}"
+          branch="formula/llm-hops-$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "llm-hops $version"
+          git push --force origin "$branch"
+          gh pr create --repo "$TAP" --head "$branch" --title "llm-hops $version" \
+            --body "Moves the formula to [$GITHUB_REF_NAME](https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME). Opened by the release workflow of $GITHUB_REPOSITORY. Before merging: \`brew audit --strict --online yauhenbichel/tap/llm-hops\` and \`brew test llm-hops\`."
