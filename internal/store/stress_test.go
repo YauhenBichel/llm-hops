@@ -515,3 +515,30 @@ func TestADamagedFileIsRefusedWithAReason(t *testing.T) {
 	}
 	s.Close()
 }
+
+// With every read connection taken (a hundred dashboards reloading), the answer to a sender still comes:
+// the row it is told about is read on the writer's connection.
+func TestAWriteAndItsSummaryDoNotQueueBehindTheReaders(t *testing.T) {
+	s := open(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < readers; i++ {
+		c, err := s.rdb.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+	}
+	within(t, 3*time.Second, "a write and its summary with the read pool taken", func() {
+		if _, err := s.Add(chain("t", 5, 1000)); err != nil {
+			t.Error(err)
+		}
+		sum, err := s.Written("t")
+		if err != nil || sum == nil || sum.Spans != 5 {
+			t.Errorf("summary: %+v %v", sum, err)
+		}
+	})
+	if sum, err := s.Written("nope"); sum != nil || err != nil {
+		t.Fatalf("an unknown trace: %+v %v", sum, err)
+	}
+}

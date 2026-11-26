@@ -6,7 +6,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,6 +54,13 @@ func (b *Broadcast) Unsubscribe(ch chan []byte) {
 	b.mu.Lock()
 	delete(b.subs, ch)
 	b.mu.Unlock()
+}
+
+// Listening says whether any stream is open.
+func (b *Broadcast) Listening() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs) > 0
 }
 
 // Publish sends an event to every subscriber.
@@ -131,8 +137,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Publish announces the traces touched by an insert (used by the API and by the in-process adapters).
 func (s *Server) Publish(touched []string) {
+	if !s.Bus.Listening() { // nobody to tell: a sender does not pay for the read
+		return
+	}
 	for _, id := range touched {
-		if sum, err := s.Store.Summary(context.Background(), id); err == nil && sum != nil {
+		if sum, err := s.Store.Written(id); err == nil && sum != nil {
 			s.Bus.Publish(map[string]any{"type": "trace", "trace": sum})
 		}
 	}

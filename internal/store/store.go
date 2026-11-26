@@ -498,6 +498,21 @@ func (s *Store) Summary(ctx context.Context, traceID string) (*model.TraceSummar
 	return &t, nil
 }
 
+// Written returns the row of a trace that was just written, read on the writer's own connection: the
+// answer to a sender must not wait in the readers' queue.
+func (s *Store) Written(traceID string) (*model.TraceSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, err := scanSummary(s.db.QueryRow("SELECT trace_id,start_ms,end_ms,service,name,status,spans,attrs FROM traces WHERE trace_id=?", traceID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // Trace returns a trace's spans, by start time: all of them, or the first limit when limit is positive.
 func (s *Store) Trace(ctx context.Context, traceID string, limit int) ([]model.Span, error) {
 	if limit <= 0 {
