@@ -3,7 +3,10 @@
 
 package otlp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // what the OpenTelemetry Python SDK's OTLP/HTTP exporter sends (JSON encoding), with GenAI attributes
 const sample = `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"my-agent"}}]},
@@ -54,5 +57,21 @@ func TestDecodeRejectsGarbageAndAcceptsEmpty(t *testing.T) {
 	spans, _, err := Decode([]byte(`{"resourceSpans":[]}`))
 	if err != nil || len(spans) != 0 {
 		t.Fatal(err, spans)
+	}
+}
+
+func TestDecodeSkipsWhatTheStoreWouldRefuse(t *testing.T) {
+	span := func(traceID, start, end string) string {
+		return `{"traceId":"` + traceID + `","spanId":"01","name":"x","startTimeUnixNano":"` + start + `","endTimeUnixNano":"` + end + `"}`
+	}
+	body := `{"resourceSpans":[{"scopeSpans":[{"spans":[` + strings.Join([]string{
+		span("5b8efff798038103d269b633813fc60c", "1790409578748000000", "1790409580748000000"), // fine
+		span(strings.Repeat("a", 65), "1790409578748000000", "1790409580748000000"),            // an id that would have to be cut
+		span("5b8efff798038103d269b633813fc60d", "1790409578748000000", "1890409578748000000"), // three years long
+		span("5b8efff798038103d269b633813fc60e", "9790409578748000000", "9790409578748000000"), // in the year 2280
+	}, ",") + `]}]}]}`
+	spans, skipped, err := Decode([]byte(body))
+	if err != nil || len(spans) != 1 || skipped != 3 {
+		t.Fatalf("spans=%d skipped=%d err=%v", len(spans), skipped, err)
 	}
 }

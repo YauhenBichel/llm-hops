@@ -26,6 +26,9 @@ import (
 const (
 	maxBatch = 5000
 	maxBody  = 32 << 20
+	// maxParam is the longest filter value in a query string, in bytes: no model, client or search text
+	// needs more, and SQLite refuses a LIKE pattern past 50 000.
+	maxParam = 200
 )
 
 // Broadcast fans a small event out to every open stream. A slow reader loses events, never blocks the writer.
@@ -51,6 +54,13 @@ func (b *Broadcast) Unsubscribe(ch chan []byte) {
 	b.mu.Lock()
 	delete(b.subs, ch)
 	b.mu.Unlock()
+}
+
+// Listening says whether any stream is open.
+func (b *Broadcast) Listening() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs) > 0
 }
 
 // Publish sends an event to every subscriber.
@@ -127,8 +137,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Publish announces the traces touched by an insert (used by the API and by the in-process adapters).
 func (s *Server) Publish(touched []string) {
+	if !s.Bus.Listening() { // nobody to tell: a sender does not pay for the read
+		return
+	}
 	for _, id := range touched {
-		if sum, err := s.Store.Summary(id); err == nil && sum != nil {
+		if sum, err := s.Store.Written(id); err == nil && sum != nil {
 			s.Bus.Publish(map[string]any{"type": "trace", "trace": sum})
 		}
 	}
@@ -159,31 +172,77 @@ func (s *Server) postSpans(w http.ResponseWriter, r *http.Request) {
 	}
 	spans := make([]model.Span, 0, len(items))
 	rejected := 0
+	reasons := []string{} // why, once each, the first few: enough for a sender to fix itself
 	for _, it := range items {
 		sp, err := model.Clean(it)
 		if err != nil {
 			rejected++
+			if msg := err.Error(); len(reasons) < 5 && !contains(reasons, msg) {
+				reasons = append(reasons, msg)
+			}
 			continue
 		}
 		spans = append(spans, sp)
 	}
-	var touched []string
-	if ifAbsent {
-		touched, err = s.Store.AddIfAbsent(spans)
-	} else {
-		touched, err = s.Store.Add(spans)
-	}
+	res, err := s.Store.AddReport(spans, ifAbsent)
 	if err != nil {
-		http.Error(w, "store: "+err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
-	s.spansReceived.Add(int64(len(spans)))
+	s.spansReceived.Add(int64(len(spans) - res.Dropped))
 	s.spansRejected.Add(int64(rejected))
-	s.Publish(touched)
-	if touched == nil {
-		touched = []string{}
+	s.Publish(res.Touched)
+	if res.Touched == nil {
+		res.Touched = []string{}
 	}
-	writeJSON(w, map[string]any{"accepted": len(spans), "rejected": rejected, "traces": touched})
+	out := map[string]any{"accepted": len(spans) - res.Dropped, "rejected": rejected, "traces": res.Touched}
+	if rejected > 0 {
+		out["errors"] = reasons
+	}
+	if res.Dropped > 0 {
+		out["dropped"] = res.Dropped
+		out["note"] = s.capNote(res)
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) capNote(res store.AddResult) string {
+	return fmt.Sprintf("%d spans were not stored: a trace holds at most %d spans (max_spans_per_trace) and %s full",
+		res.Dropped, s.Store.MaxSpansPerTrace, quoteSome(res.Full))
+}
+
+func quoteSome(ids []string) string {
+	const show = 3
+	q := make([]string, 0, show)
+	for _, id := range ids[:min(show, len(ids))] {
+		q = append(q, strconv.Quote(id))
+	}
+	switch {
+	case len(ids) > show:
+		return fmt.Sprintf("%s and %d more are", strings.Join(q, ", "), len(ids)-show)
+	case len(ids) == 1:
+		return q[0] + " is"
+	}
+	return strings.Join(q, ", ") + " are"
+}
+
+func contains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// fail answers a store error without its text (SQL and file paths stay in the server's log). A request
+// whose caller has gone gets nothing: its query was cancelled with it.
+func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	if r.Context().Err() != nil {
+		return
+	}
+	log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
+	http.Error(w, "the store failed; the reason is in the server's log", http.StatusInternalServerError)
 }
 
 // postOTLP takes OpenTelemetry traces in OTLP/JSON: what any OpenTelemetry SDK's OTLP HTTP exporter sends
@@ -204,17 +263,24 @@ func (s *Server) postOTLP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not OTLP/JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	touched, err := s.Store.Add(spans)
+	res, err := s.Store.AddReport(spans, false)
 	if err != nil {
-		http.Error(w, "store: "+err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
-	s.spansReceived.Add(int64(len(spans)))
+	s.spansReceived.Add(int64(len(spans) - res.Dropped))
 	s.spansRejected.Add(int64(skipped))
-	s.Publish(touched)
+	s.Publish(res.Touched)
 	out := map[string]any{}
-	if skipped > 0 {
-		out["partialSuccess"] = map[string]any{"rejectedSpans": skipped, "errorMessage": "spans without a trace id or a start time were skipped"}
+	if skipped+res.Dropped > 0 {
+		msg := []string{}
+		if skipped > 0 {
+			msg = append(msg, "spans without a trace id or a start time, with an id over 64 bytes or with a time that cannot be right were skipped")
+		}
+		if res.Dropped > 0 {
+			msg = append(msg, s.capNote(res))
+		}
+		out["partialSuccess"] = map[string]any{"rejectedSpans": skipped + res.Dropped, "errorMessage": strings.Join(msg, "; ")}
 	}
 	writeJSON(w, out)
 }
@@ -222,30 +288,56 @@ func (s *Server) postOTLP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getTraces(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := store.Filter{Since: optInt(q, "since"), Until: optInt(q, "until"), MinMS: optInt(q, "min_ms"),
-		Model: q.Get("model"), Service: q.Get("service"), Status: q.Get("status"), Client: q.Get("client"), Q: q.Get("q"), Kind: q.Get("kind")}
-	if v := optInt(q, "limit"); v != nil {
-		f.Limit = int(*v)
+		Model: q.Get("model"), Service: q.Get("service"), Status: q.Get("status"), Client: q.Get("client"), Q: q.Get("q"), Kind: q.Get("kind"), Sort: q.Get("sort")}
+	for _, k := range []string{"model", "service", "status", "client", "q", "kind"} {
+		if len(q.Get(k)) > maxParam {
+			http.Error(w, fmt.Sprintf("%s is too long: at most %d bytes", k, maxParam), http.StatusBadRequest)
+			return
+		}
 	}
-	rows, err := s.Store.Traces(f)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if f.Sort != "" && f.Sort != "duration" && f.Sort != "start" {
+		http.Error(w, `sort is "start" (newest first, the default) or "duration" (slowest first)`, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"traces": rows})
+	if v := optInt(q, "limit"); v != nil {
+		f.Limit = int(min(max(*v, 0), 5000))
+	}
+	if v := optInt(q, "offset"); v != nil {
+		f.Offset = int(min(max(*v, 0), 1<<30))
+	}
+	rows, err := s.Store.Traces(r.Context(), f)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out := map[string]any{"traces": rows}
+	if q.Get("count") == "1" { // how many match in all: a second scan of the window, so only on request
+		total, err := s.Store.CountTraces(r.Context(), f)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		out["total"] = total
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) getTrace(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	spans, err := s.Store.Trace(id)
+	limit := 0 // every span, unless max_spans asks for the first few
+	if v := optInt(r.URL.Query(), "max_spans"); v != nil {
+		limit = int(min(max(*v, 0), 1<<30))
+	}
+	spans, err := s.Store.Trace(r.Context(), id, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
 	if len(spans) == 0 {
 		http.Error(w, "no such trace", http.StatusNotFound)
 		return
 	}
-	sum, _ := s.Store.Summary(id)
+	sum, _ := s.Store.Summary(r.Context(), id)
 	writeJSON(w, map[string]any{"trace": sum, "spans": spans})
 }
 
@@ -267,9 +359,9 @@ func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
 	if v := optInt(r.URL.Query(), "bucket_ms"); v != nil {
 		bucket = *v
 	}
-	st, err := s.Store.Stats(since, until, bucket)
+	st, err := s.Store.Stats(r.Context(), since, until, bucket)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, st)
@@ -277,14 +369,14 @@ func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getFlow(w http.ResponseWriter, r *http.Request) {
 	since, until := window(r.URL.Query(), 3_600_000)
-	edges, err := s.Store.Edges(since, until)
+	edges, err := s.Store.Edges(r.Context(), since, until)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
-	services, err := s.Store.Services(since, until)
+	services, err := s.Store.Services(r.Context(), since, until)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{"since_ms": since, "until_ms": until, "edges": edges, "services": services})
@@ -292,9 +384,9 @@ func (s *Server) getFlow(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getLoads(w http.ResponseWriter, r *http.Request) {
 	since, until := window(r.URL.Query(), 3_600_000)
-	loads, err := s.Store.Loads(since, until)
+	loads, err := s.Store.Loads(r.Context(), since, until)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{"since_ms": since, "until_ms": until, "loads": loads})
@@ -302,9 +394,9 @@ func (s *Server) getLoads(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getFacets(w http.ResponseWriter, r *http.Request) {
 	since, until := window(r.URL.Query(), 86_400_000)
-	f, err := s.Store.Facets(since, until)
+	f, err := s.Store.Facets(r.Context(), since, until)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, f)

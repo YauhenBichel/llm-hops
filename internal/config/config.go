@@ -26,11 +26,15 @@ type Config struct {
 	OllamaSince   string   `toml:"ollama_since"`   // read the journal from here first, e.g. "7 days ago"; empty means from now
 	Demo          int      `toml:"demo"`           // synthetic traces to load at start
 	Live          bool     `toml:"live"`           // with demo: keep adding one trace a second
+	// MaxSpansPerTrace caps one trace: past it new spans are dropped and counted. 0 means no cap.
+	MaxSpansPerTrace int `toml:"max_spans_per_trace"`
+	// MaxDBMB rolls up and drops the oldest whole days when the stored data is larger. 0 means no limit.
+	MaxDBMB int64 `toml:"max_db_mb"`
 }
 
 // Default is what runs with no file and no flags.
 func Default() Config {
-	return Config{Listen: "127.0.0.1:11602", DB: "hops.db", KeepDays: 14, Title: "llm-hops", OllamaURL: "http://127.0.0.1:11434"}
+	return Config{Listen: "127.0.0.1:11602", DB: "hops.db", KeepDays: 14, Title: "llm-hops", OllamaURL: "http://127.0.0.1:11434", MaxSpansPerTrace: 5000}
 }
 
 // Load reads path over the defaults; a missing path with `must` false is not an error.
@@ -56,6 +60,9 @@ func Load(path string, must bool) (Config, error) {
 	if c.KeepDays <= 0 {
 		return c, fmt.Errorf("%s: keep_days must be positive", path)
 	}
+	if c.MaxSpansPerTrace < 0 || c.MaxDBMB < 0 {
+		return c, fmt.Errorf("%s: max_spans_per_trace and max_db_mb must not be negative", path)
+	}
 	return applyEnv(c), nil
 }
 
@@ -71,6 +78,8 @@ const Example = `# llm-hops configuration. Every key is optional; flags on the c
 listen = "127.0.0.1:11602"
 db = "hops.db"
 keep_days = 14            # spans older than this become daily statistics and are dropped
+max_spans_per_trace = 5000   # a trace holds at most this many spans; more are dropped, counted and reported to the sender (0: no cap)
+max_db_mb = 0             # when the data is larger, the oldest whole days are rolled up and dropped early (0: no limit)
 tail = []                 # yllm-gateway request logs to follow, e.g. ["/home/me/yllm-gateway/var/requests.jsonl"]
 from_start = false        # read the whole log first, then follow
 ollama_journal = false    # follow journalctl -u ollama on this machine: every model load becomes a trace

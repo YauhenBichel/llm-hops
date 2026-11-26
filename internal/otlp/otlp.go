@@ -84,7 +84,8 @@ type request struct {
 	} `json:"resourceSpans"`
 }
 
-// Decode turns an OTLP/JSON ExportTraceServiceRequest into spans. Spans without a trace id or a start are skipped.
+// Decode turns an OTLP/JSON ExportTraceServiceRequest into spans. Spans without a trace id or a start, and
+// spans model.Validate refuses (an id over 64 bytes, a time that cannot be right), are skipped and counted.
 func Decode(body []byte) ([]model.Span, int, error) {
 	var req request
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -92,6 +93,7 @@ func Decode(body []byte) ([]model.Span, int, error) {
 	}
 	var out []model.Span
 	skipped := 0
+	now := model.NowMS()
 	for _, rs := range req.ResourceSpans {
 		service := "otel"
 		for _, kv := range rs.Resource.Attributes {
@@ -134,8 +136,13 @@ func Decode(body []byte) ([]model.Span, int, error) {
 				if code := strings.Trim(string(s.Status.Code), `"`); code == "2" || code == "STATUS_CODE_ERROR" {
 					status = "error"
 				}
-				out = append(out, model.Span{TraceID: strings.ToLower(s.TraceID), SpanID: strings.ToLower(s.SpanID), ParentID: strings.ToLower(s.ParentSpanID),
-					Service: service, Name: s.Name, StartMS: start, EndMS: end, Status: status, Attrs: attrs})
+				sp := model.Span{TraceID: strings.ToLower(s.TraceID), SpanID: strings.ToLower(s.SpanID), ParentID: strings.ToLower(s.ParentSpanID),
+					Service: service, Name: s.Name, StartMS: start, EndMS: end, Status: status, Attrs: attrs}
+				if model.Validate(sp, now) != nil { // the same limits as the native API: id length, sane times
+					skipped++
+					continue
+				}
+				out = append(out, sp)
 			}
 		}
 	}

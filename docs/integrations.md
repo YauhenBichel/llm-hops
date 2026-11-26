@@ -74,9 +74,9 @@ With a token: `-token TOKEN` or `LLM_HOPS_TOKEN` in the environment. Tools:
 | Tool | Answers |
 |---|---|
 | `hops_stats` | counts, error rate, p50/p95, model switches, time per hop, per model, local against cloud, for a window (`15m`, `1h`, `6h`, `24h`, `7d`) |
-| `hops_slowest` | the slowest requests in a window with where their time went |
-| `hops_traces` | the newest requests, filterable by model, client, service, status, slower than, free text |
-| `hops_trace` | one request as a text waterfall with every hop and attribute |
+| `hops_slowest` | the slowest requests of the whole window with where their time went |
+| `hops_traces` | the newest requests, filterable by model, client, service, status, slower than, free text; at most 100 a call, `offset` for the next page |
+| `hops_trace` | one request as a text waterfall with every hop and attribute; the first `max_spans` spans (200, at most 1000) of a very large trace, with a note |
 | `hops_flow` | the services and the hops between them |
 
 The tools return text, never prompts (the store has none), and they never write.

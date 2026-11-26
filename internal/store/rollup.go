@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -46,8 +47,13 @@ func dayOf(ms int64) string { return time.UnixMilli(ms).UTC().Format("2006-01-02
 // so a re-run is safe), then drops their spans. Only whole days before the cutoff's day are rolled up: the
 // cutoff's own day stays as spans until the next run, so a day is never half in each table.
 func (s *Store) RollupAndPrune(keepMS, nowMS int64) (int64, error) {
-	cutoff := nowMS - keepMS
-	dayCut := time.UnixMilli(cutoff).UTC().Truncate(24 * time.Hour).UnixMilli() // whole days only
+	return s.rollupBefore(dayStart(nowMS - keepMS)) // whole days only
+}
+
+func dayStart(ms int64) int64 { return time.UnixMilli(ms).UTC().Truncate(24 * time.Hour).UnixMilli() }
+
+// rollupBefore folds and drops every trace that started before dayCut, the start of a UTC day.
+func (s *Store) rollupBefore(dayCut int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query("SELECT start_ms, end_ms, status, attrs FROM traces WHERE start_ms < ? ORDER BY start_ms", dayCut)
@@ -120,8 +126,8 @@ func (s *Store) RollupAndPrune(keepMS, nowMS int64) (int64, error) {
 }
 
 // Daily lists the rolled-up rows whose day falls in the window.
-func (s *Store) Daily(sinceMS, untilMS int64) ([]DailyRow, error) {
-	rows, err := s.db.Query("SELECT day, model, requests, errors, p50_ms, p95_ms, tokens_out FROM daily WHERE day >= ? AND day <= ? ORDER BY day, model",
+func (s *Store) Daily(ctx context.Context, sinceMS, untilMS int64) ([]DailyRow, error) {
+	rows, err := s.rdb.QueryContext(ctx, "SELECT day, model, requests, errors, p50_ms, p95_ms, tokens_out FROM daily WHERE day >= ? AND day <= ? ORDER BY day, model",
 		dayOf(sinceMS), dayOf(untilMS))
 	if err != nil {
 		return nil, err
@@ -139,15 +145,18 @@ func (s *Store) Daily(sinceMS, untilMS int64) ([]DailyRow, error) {
 }
 
 // OldestTraceMS is the start of the oldest trace still held as spans, or 0 when there is none.
-func (s *Store) OldestTraceMS() int64 {
+func (s *Store) OldestTraceMS(ctx context.Context) (int64, error) {
 	var v int64
-	_ = s.db.QueryRow("SELECT COALESCE(min(start_ms), 0) FROM traces").Scan(&v)
-	return v
+	err := s.rdb.QueryRowContext(ctx, "SELECT COALESCE(min(start_ms), 0) FROM traces").Scan(&v)
+	return v, err
 }
 
 // mergeDaily adds the rolled-up days before the oldest span-held trace into st, marking it approximate.
-func (s *Store) mergeDaily(st *Stats, sinceMS, untilMS int64) error {
-	oldest := s.OldestTraceMS()
+func (s *Store) mergeDaily(ctx context.Context, st *Stats, sinceMS, untilMS int64) error {
+	oldest, err := s.OldestTraceMS(ctx)
+	if err != nil {
+		return err
+	}
 	limit := untilMS
 	if oldest > 0 {
 		limit = min(untilMS, oldest)
@@ -155,7 +164,7 @@ func (s *Store) mergeDaily(st *Stats, sinceMS, untilMS int64) error {
 	if sinceMS >= limit {
 		return nil
 	}
-	daily, err := s.Daily(sinceMS, limit-1)
+	daily, err := s.Daily(ctx, sinceMS, limit-1)
 	if err != nil {
 		return err
 	}
@@ -220,8 +229,8 @@ func (s *Store) mergeDaily(st *Stats, sinceMS, untilMS int64) error {
 }
 
 // ExportSpans streams every span of the traces that started in the window, oldest first, one per call of fn.
-func (s *Store) ExportSpans(sinceMS, untilMS int64, fn func(model.Span) error) error {
-	rows, err := s.db.Query("SELECT s.trace_id,s.span_id,COALESCE(s.parent_id,''),s.service,s.name,s.start_ms,s.end_ms,s.status,s.attrs "+
+func (s *Store) ExportSpans(ctx context.Context, sinceMS, untilMS int64, fn func(model.Span) error) error {
+	rows, err := s.rdb.QueryContext(ctx, "SELECT s.trace_id,s.span_id,COALESCE(s.parent_id,''),s.service,s.name,s.start_ms,s.end_ms,s.status,s.attrs "+
 		"FROM spans s JOIN traces t ON t.trace_id = s.trace_id WHERE t.start_ms >= ? AND t.start_ms < ? ORDER BY t.start_ms, s.start_ms", sinceMS, untilMS)
 	if err != nil {
 		return err

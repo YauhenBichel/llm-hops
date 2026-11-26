@@ -2,6 +2,8 @@
 listen = "127.0.0.1:11602"
 db = "hops.db"
 keep_days = 14            # spans older than this become daily statistics and are dropped
+max_spans_per_trace = 5000   # a trace holds at most this many spans; more are dropped, counted and reported to the sender (0: no cap)
+max_db_mb = 0             # when the data is larger, the oldest whole days are rolled up and dropped early (0: no limit)
 tail = []                 # yllm-gateway request logs to follow, e.g. ["/home/me/yllm-gateway/var/requests.jsonl"]
 from_start = false        # read the whole log first, then follow
 # token = "..."           # when set, POST /api/v1/spans, the API and the page need it

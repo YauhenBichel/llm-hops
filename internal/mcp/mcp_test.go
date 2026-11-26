@@ -62,9 +62,23 @@ func TestJSONRPCConversation(t *testing.T) {
 	if err := s.Serve(strings.NewReader(in), &out); err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 9 { // 8 answers (the notification gets none) + the parse error
-		t.Fatalf("%d lines:\n%s", len(lines), out.String())
+	got := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(got) != 9 { // 8 answers (the notification gets none) + the parse error
+		t.Fatalf("%d lines:\n%s", len(got), out.String())
+	}
+	// tool calls run beside the reader, so answers come as they finish: put them in the order of their ids,
+	// the parse error (id null) last
+	lines := make([]string, 9)
+	for _, l := range got {
+		var r struct {
+			ID *int `json:"id"`
+		}
+		json.Unmarshal([]byte(l), &r)
+		if r.ID == nil {
+			lines[8] = l
+		} else {
+			lines[*r.ID-1] = l
+		}
 	}
 	var init map[string]any
 	json.Unmarshal([]byte(lines[0]), &init)

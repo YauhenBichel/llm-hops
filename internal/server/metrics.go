@@ -14,11 +14,11 @@ import (
 
 // metrics renders the last five minutes in Prometheus' text format: what a Grafana panel or an alert rule
 // needs, without a client library. Percentiles are computed on the window, not estimated from buckets.
-func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	now := model.NowMS()
-	st, err := s.Store.Stats(now-300_000, now, 60_000)
+	st, err := s.Store.Stats(r.Context(), now-300_000, now+1, 60_000) // +1: a trace that started this millisecond counts
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.fail(w, r, err)
 		return
 	}
 	var b strings.Builder
@@ -33,6 +33,8 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		fmt.Sprintf("llm_hops_spans_received_total %d", s.spansReceived.Load()))
 	line("llm_hops_spans_rejected_total", "Spans rejected as malformed since the process started.", "counter",
 		fmt.Sprintf("llm_hops_spans_rejected_total %d", s.spansRejected.Load()))
+	line("llm_hops_spans_dropped_total", "Spans not stored since the process started: their trace was at max_spans_per_trace.", "counter",
+		fmt.Sprintf("llm_hops_spans_dropped_total %d", s.Store.Dropped()))
 	line("llm_hops_requests_5m", "Requests (traces) that started in the last five minutes.", "gauge",
 		fmt.Sprintf("llm_hops_requests_5m %d", st.Requests))
 	line("llm_hops_errors_5m", "Requests with an error in the last five minutes.", "gauge",
