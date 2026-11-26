@@ -1,4 +1,4 @@
-.PHONY: build test lint dist demo sdk-test
+.PHONY: build test lint dist snapshot demo sdk-test
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -18,6 +18,11 @@ dist:
 	CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/llm-hops-linux-amd64 ./cmd/llm-hops
 	CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/llm-hops-linux-arm64 ./cmd/llm-hops
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/llm-hops-darwin-arm64 ./cmd/llm-hops
+
+# What the release workflow would build from this commit, into dist/: nothing is published. Needs goreleaser.
+snapshot:
+	goreleaser check
+	goreleaser release --snapshot --clean --skip=publish
 
 demo: build
 	./llm-hops serve -db /tmp/hops-demo.db -demo 300 -live

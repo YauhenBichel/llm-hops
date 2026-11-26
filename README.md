@@ -31,6 +31,13 @@ go install github.com/YauhenBichel/llm-hops/cmd/llm-hops@latest   # or download 
 llm-hops serve -demo 300 -live
 ```
 
+With Homebrew, on macOS or Linux (available once the formula is in
+[the tap](https://github.com/YauhenBichel/homebrew-tap); until then use `go install` or a release binary):
+
+```bash
+brew install yauhenbichel/tap/llm-hops
+```
+
 Open http://127.0.0.1:11602/. The demo is a small home LLM system: a router on a laptop, a gateway with one
 slot, a model server that swaps models and loses its cache, five clients.
 

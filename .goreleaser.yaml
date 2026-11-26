@@ -1,0 +1,57 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+#
+# What a release holds. `make dist` built three of these binaries by hand; this builds them the same way
+# (no CGO, -trimpath, -s -w, the version from the tag), adds darwin/amd64, archives and checksums.
+# Run by .github/workflows/release.yml on a version tag. Try it locally with `make snapshot`.
+#
+# Homebrew is not published from here. GoReleaser's `brews` is deprecated (v2.10) and its replacement,
+# `homebrew_casks`, ships unsigned prebuilt binaries that macOS quarantines. The tap has a formula that
+# builds from the tagged source instead; release.yml opens the pull request that moves it to a new tag.
+version: 2
+
+project_name: llm-hops
+
+builds:
+  - id: llm-hops
+    main: ./cmd/llm-hops
+    binary: llm-hops
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  # llm-hops-0.3.0-linux-amd64.tar.gz: the binary, the licence, the README and the example configuration.
+  - id: archive
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - hops.example.toml
+  # llm-hops-linux-amd64: the bare binary, under the name every release so far has used (docs/deploy.md).
+  - id: binary
+    formats: [binary]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot+{{ .ShortCommit }}"
+
+changelog:
+  use: github
+  filters:
+    exclude:
+      - "^Merge "
+
+release:
+  # A release written by hand first (`gh release create v0.3.0 --title ... --notes ...`) keeps its title and
+  # notes; the files are added to it. A bare tag gets a release with the commit list.
+  mode: keep-existing
+  prerelease: auto
