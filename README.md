@@ -38,6 +38,13 @@ With Homebrew, on macOS or Linux (available once the formula is in
 brew install yauhenbichel/tap/llm-hops
 ```
 
+With npm, on macOS or Linux, arm64 or x64 (available once the package is on npm; it holds the release
+binary, runs no install script and downloads nothing else):
+
+```bash
+npx llm-hops serve -demo 300 -live          # or: npm install -g llm-hops
+```
+
 Open http://127.0.0.1:11602/. The demo is a small home LLM system: a router on a laptop, a gateway with one
 slot, a model server that swaps models and loses its cache, five clients.
 

@@ -7,6 +7,13 @@ name: release
 # One-time setup by the owner: the repository secret HOMEBREW_TAP_TOKEN, a fine-grained personal access
 # token for YauhenBichel/homebrew-tap only, with Contents: read and write and Pull requests: read and write.
 # Without it the first job fails and says so, before anything is built or released.
+#
+# npm: the release job also builds the npm packages (npm/build.js) from the same binaries and keeps the
+# tarballs as the run's `npm-packages` artifact. The npm job publishes them with trusted publishing: an
+# OIDC token from this workflow in the environment `npm`, no npm token stored anywhere. It runs only when
+# the repository variable NPM_PUBLISH says how: `publish` (npm publish) or `stage` (npm stage publish,
+# approved by hand on npmjs.com). Leave it unset until the five packages exist on npm and each has this
+# workflow as its trusted publisher; the steps are in npm/RELEASING.md.
 on:
   push:
     tags: ['v*.*.*']
@@ -47,6 +54,79 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build the npm packages
+        run: node npm/build.js --version "${GITHUB_REF_NAME#v}" --pack
+      - name: The npm package runs the released binary
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          prefix=$(mktemp -d)
+          npm install --global --prefix "$prefix" --ignore-scripts --no-audit --no-fund \
+            "dist/npm/llm-hops-linux-x64-$version.tgz" "dist/npm/llm-hops-$version.tgz"
+          got=$("$prefix/bin/llm-hops" version)
+          test "$got" = "llm-hops $version" || { echo "::error::the npm package says '$got', the tag says $version"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: dist/npm/*.tgz
+          if-no-files-found: error
+
+  npm:
+    needs: release
+    if: ${{ vars.NPM_PUBLISH == 'publish' || vars.NPM_PUBLISH == 'stage' }}
+    runs-on: ubuntu-latest         # trusted publishing needs a GitHub-hosted runner
+    environment: npm               # the trusted publisher on npmjs.com names this environment
+    permissions:
+      id-token: write              # the OIDC token npm exchanges for a publish; there is no NPM_TOKEN
+    env:
+      HOW: ${{ vars.NPM_PUBLISH }}
+      # The platform packages go first: `llm-hops` depends on them at this exact version.
+      PACKAGES: llm-hops-darwin-arm64 llm-hops-darwin-x64 llm-hops-linux-arm64 llm-hops-linux-x64 llm-hops
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: tarballs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24         # trusted publishing needs Node 22.14 and npm 11.5.1 or later
+          registry-url: https://registry.npmjs.org
+      - name: Every package has the version of the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for name in $PACKAGES; do
+            file="tarballs/$name-$version.tgz"
+            test -f "$file" || { echo "::error::$file is missing: the packages were not built for $GITHUB_REF_NAME"; exit 1; }
+            mkdir -p "packages/$name"
+            tar -xzf "$file" -C "packages/$name" --strip-components=1
+            NAME="$name" VERSION="$version" node -e '
+              const p = require(process.cwd() + "/packages/" + process.env.NAME + "/package.json");
+              const bad = [];
+              if (p.name !== process.env.NAME) bad.push("name " + p.name);
+              if (p.version !== process.env.VERSION) bad.push("version " + p.version);
+              for (const [dep, v] of Object.entries(p.optionalDependencies || {}))
+                if (v !== process.env.VERSION) bad.push(dep + "@" + v);
+              if (bad.length) { console.log("::error::" + process.env.NAME + " does not match the tag " + process.env.VERSION + ": " + bad.join(", ")); process.exit(1); }
+            '
+          done
+          npm --version
+      - name: Publish to npm
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in *-*) tag=next ;; *) tag=latest ;; esac     # v1.0.0-rc1 does not become `latest`
+          for name in $PACKAGES; do
+            if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
+              echo "::notice::$name $version is already on npm"
+              continue
+            fi
+            if [ "$HOW" = stage ]; then
+              (cd "packages/$name" && npm stage publish --tag "$tag")
+            else
+              (cd "packages/$name" && npm publish --access public --tag "$tag")
+            fi
+          done
 
   homebrew:
     needs: release

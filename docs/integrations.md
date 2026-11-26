@@ -67,6 +67,7 @@ was that request slow?":
 ```bash
 claude mcp add llm-hops -- llm-hops mcp -to http://127.0.0.1:11602            # Claude Code
 # Cursor, Windsurf, Continue, Zed: the same command in their MCP settings (stdio server)
+claude mcp add llm-hops -- npx -y llm-hops mcp -to http://127.0.0.1:11602     # no install: the npm package
 ```
 
 With a token: `-token TOKEN` or `LLM_HOPS_TOKEN` in the environment. Tools:

@@ -1,0 +1,28 @@
+{
+  "name": "llm-hops",
+  "version": "0.0.0-development",
+  "description": "See every hop of a request through your local LLM system: a single binary with a web UI and an MCP server.",
+  "keywords": ["llm", "tracing", "observability", "mcp", "ollama", "local-llm"],
+  "homepage": "https://github.com/YauhenBichel/llm-hops#readme",
+  "bugs": "https://github.com/YauhenBichel/llm-hops/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YauhenBichel/llm-hops.git"
+  },
+  "license": "Apache-2.0",
+  "bin": {
+    "llm-hops": "bin/llm-hops.js"
+  },
+  "files": [
+    "bin/llm-hops.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "llm-hops-darwin-arm64": "0.0.0-development",
+    "llm-hops-darwin-x64": "0.0.0-development",
+    "llm-hops-linux-arm64": "0.0.0-development",
+    "llm-hops-linux-x64": "0.0.0-development"
+  }
+}
