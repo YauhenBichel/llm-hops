@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestAddBuildsASummaryFromTheRootAndTheHops(t *testing.T) {
 	if err != nil || len(touched) != 1 || touched[0] != "t1" {
 		t.Fatalf("touched=%v err=%v", touched, err)
 	}
-	sum, _ := s.Summary("t1")
+	sum, _ := s.Summary(context.Background(), "t1")
 	if sum == nil || sum.StartMS != 1000 || sum.EndMS != 1500 || sum.Status != "error" || sum.Spans != 2 || sum.Service != "gateway" {
 		t.Fatalf("summary: %+v", sum)
 	}
@@ -44,7 +45,7 @@ func TestAddBuildsASummaryFromTheRootAndTheHops(t *testing.T) {
 	// a repeat of the same span replaces it
 	root.EndMS = 1600
 	s.Add([]model.Span{root})
-	sum, _ = s.Summary("t1")
+	sum, _ = s.Summary(context.Background(), "t1")
 	if sum.EndMS != 1600 || sum.Spans != 2 {
 		t.Fatalf("after replace: %+v", sum)
 	}
@@ -58,7 +59,7 @@ func TestTracesFilterAndOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	all, _ := s.Traces(Filter{})
+	all, _ := s.Traces(context.Background(), Filter{})
 	if len(all) != 60 {
 		t.Fatalf("got %d traces", len(all))
 	}
@@ -67,13 +68,13 @@ func TestTracesFilterAndOrder(t *testing.T) {
 			t.Fatal("not newest first")
 		}
 	}
-	errs, _ := s.Traces(Filter{Status: "error"})
+	errs, _ := s.Traces(context.Background(), Filter{Status: "error"})
 	for _, tr := range errs {
 		if tr.Status != "error" {
 			t.Fatal("status filter")
 		}
 	}
-	coder, _ := s.Traces(Filter{Model: "qwen3-coder-next"})
+	coder, _ := s.Traces(context.Background(), Filter{Model: "qwen3-coder-next"})
 	if len(coder) == 0 {
 		t.Fatal("no coder traces in 60 synthetic ones")
 	}
@@ -83,11 +84,11 @@ func TestTracesFilterAndOrder(t *testing.T) {
 		}
 	}
 	since := all[10].StartMS
-	recent, _ := s.Traces(Filter{Since: &since, Limit: 5})
+	recent, _ := s.Traces(context.Background(), Filter{Since: &since, Limit: 5})
 	if len(recent) != 5 {
 		t.Fatalf("limit: %d", len(recent))
 	}
-	q, _ := s.Traces(Filter{Q: "editor"})
+	q, _ := s.Traces(context.Background(), Filter{Q: "editor"})
 	for _, tr := range q {
 		if tr.Attrs["client"] != "editor" {
 			t.Fatal("search")
@@ -101,7 +102,7 @@ func TestStatsFlowFacetsAndPrune(t *testing.T) {
 	for i := 0; i < 80; i++ {
 		s.Add(g.Next())
 	}
-	st, err := s.Stats(0, 10_000_000, 60_000)
+	st, err := s.Stats(context.Background(), 0, 10_000_000, 60_000)
 	if err != nil || st.Requests != 80 {
 		t.Fatalf("stats: %+v %v", st, err)
 	}
@@ -117,7 +118,7 @@ func TestStatsFlowFacetsAndPrune(t *testing.T) {
 	if len(st.Buckets) == 0 {
 		t.Fatal("buckets")
 	}
-	edges, _ := s.Edges(0, 10_000_000)
+	edges, _ := s.Edges(context.Background(), 0, 10_000_000)
 	var sawGatewayToOllama bool
 	for _, e := range edges {
 		if e.From == "gateway:request" && e.To == "ollama:upstream" && e.N > 0 {
@@ -127,11 +128,11 @@ func TestStatsFlowFacetsAndPrune(t *testing.T) {
 	if !sawGatewayToOllama {
 		t.Fatalf("edges: %+v", edges)
 	}
-	svcs, _ := s.Services(0, 10_000_000)
+	svcs, _ := s.Services(context.Background(), 0, 10_000_000)
 	if len(svcs) < 3 {
 		t.Fatalf("services: %+v", svcs)
 	}
-	f, _ := s.Facets(0, 10_000_000)
+	f, _ := s.Facets(context.Background(), 0, 10_000_000)
 	if len(f["model"]) < 2 || len(f["client"]) < 2 || len(f["service"]) < 1 {
 		t.Fatalf("facets: %v", f)
 	}
@@ -139,11 +140,11 @@ func TestStatsFlowFacetsAndPrune(t *testing.T) {
 	if err != nil || n != 80 {
 		t.Fatalf("prune: %d %v", n, err)
 	}
-	left, _ := s.Traces(Filter{})
+	left, _ := s.Traces(context.Background(), Filter{})
 	if len(left) != 0 {
 		t.Fatal("prune left traces")
 	}
-	spans, _ := s.Trace(st.Models[0].Model)
+	spans, _ := s.Trace(context.Background(), st.Models[0].Model, 0)
 	if len(spans) != 0 {
 		t.Fatal("prune left spans")
 	}
@@ -168,19 +169,19 @@ func TestAddIfAbsentNeverOverwritesAndAddWins(t *testing.T) {
 	// the log's version first, then the service's own: the exact one replaces it
 	s.AddIfAbsent([]model.Span{coarse})
 	s.Add([]model.Span{exact})
-	sp, _ := s.Trace("t")
+	sp, _ := s.Trace(context.Background(), "t", 0)
 	if sp[0].ParentID != "harness1" {
 		t.Fatalf("exact must replace: %+v", sp[0])
 	}
 	// the service's own first, then the log's: the log's is ignored
 	s.AddIfAbsent([]model.Span{coarse})
-	sp, _ = s.Trace("t")
+	sp, _ = s.Trace(context.Background(), "t", 0)
 	if sp[0].ParentID != "harness1" {
 		t.Fatalf("log must not overwrite: %+v", sp[0])
 	}
 	// a span the log knows and the service did not post is still added
 	touched, _ := s.AddIfAbsent([]model.Span{{TraceID: "t", SpanID: "reply", ParentID: "root", Service: "gateway", Name: "reply", StartMS: 1990, EndMS: 2000}})
-	sp, _ = s.Trace("t")
+	sp, _ = s.Trace(context.Background(), "t", 0)
 	if len(sp) != 2 || len(touched) != 1 {
 		t.Fatalf("%d spans, touched %v", len(sp), touched)
 	}

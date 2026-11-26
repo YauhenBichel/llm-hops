@@ -6,12 +6,17 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	_ "modernc.org/sqlite" // the driver, pure Go
 
@@ -32,6 +37,7 @@ CREATE TABLE IF NOT EXISTS spans (
   PRIMARY KEY (trace_id, span_id)
 );
 CREATE INDEX IF NOT EXISTS spans_start ON spans(start_ms);
+CREATE INDEX IF NOT EXISTS spans_parent ON spans(trace_id, parent_id);
 CREATE TABLE IF NOT EXISTS traces (
   trace_id TEXT PRIMARY KEY,
   start_ms INTEGER NOT NULL,
@@ -45,90 +51,227 @@ CREATE TABLE IF NOT EXISTS traces (
 CREATE INDEX IF NOT EXISTS traces_start ON traces(start_ms);
 `
 
-// Store is safe for concurrent use; writes are serialised.
+// readers is how many connections serve queries beside the one that writes.
+const readers = 4
+
+// Store is safe for concurrent use. Writes are serialised on one connection; queries run on a small pool
+// of read-only connections beside it (WAL lets readers work while the writer commits), so a burst of page
+// loads does not make the senders wait.
 type Store struct {
 	Path string
-	db   *sql.DB
-	mu   sync.Mutex
+	// MaxSpansPerTrace caps a trace: once it holds this many spans, new ones are dropped and counted
+	// (a repeat of a stored span still replaces it). Zero means no cap.
+	MaxSpansPerTrace int
+
+	db      *sql.DB // the writer, one connection
+	rdb     *sql.DB // the readers; the same handle as db for an in-memory database
+	mu      sync.Mutex
+	dropped atomic.Int64
 }
 
-// Open creates the file and the schema when needed.
+// Open creates the file and the schema when needed, and brings an older file up to date: the only change
+// so far is the index spans(trace_id, parent_id), built once on the first start (seconds per million spans).
+// A file that fails SQLite's quick check is refused, with the reason.
 func Open(path string) (*Store, error) {
+	fresh := true
+	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+		fresh = false
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1) // one connection: SQLite serialises anyway, and this keeps the pragmas on it
-	for _, p := range []string{"PRAGMA journal_mode = WAL", "PRAGMA synchronous = FULL", "PRAGMA busy_timeout = 5000"} {
+	db.SetMaxOpenConns(1) // one writer: SQLite has one anyway, and this keeps the pragmas on it
+	pragmas := []string{"PRAGMA journal_mode = WAL", "PRAGMA synchronous = FULL", "PRAGMA busy_timeout = 5000"}
+	if fresh {
+		// a new file gives pages back after a prune (FreePages); the mode can only be chosen before the
+		// first table exists, so an older file keeps its own until `llm-hops vacuum` rebuilds it
+		pragmas = append([]string{"PRAGMA auto_vacuum = INCREMENTAL"}, pragmas...)
+	}
+	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
 			db.Close()
+			if !fresh {
+				return nil, damaged(path, err.Error())
+			}
 			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+	}
+	if !fresh {
+		var res string
+		if err := db.QueryRow("PRAGMA quick_check(1)").Scan(&res); err != nil {
+			db.Close()
+			return nil, damaged(path, err.Error())
+		} else if res != "ok" {
+			db.Close()
+			return nil, damaged(path, res)
+		}
+		var have int
+		if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='spans_parent'").Scan(&have); err == nil && have == 0 {
+			var tables int
+			_ = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='spans'").Scan(&tables)
+			if tables > 0 {
+				log.Printf("%s: building the index spans(trace_id, parent_id) once; this takes seconds per million spans", path)
+			}
 		}
 	}
 	if _, err := db.Exec(schema + rollupSchema); err != nil {
 		db.Close()
+		if !fresh {
+			return nil, damaged(path, err.Error())
+		}
 		return nil, err
 	}
-	return &Store{Path: path, db: db}, nil
+	s := &Store{Path: path, db: db, rdb: db}
+	if path != ":memory:" && !strings.Contains(path, "mode=memory") {
+		rdb, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		rdb.SetMaxOpenConns(readers)
+		rdb.SetMaxIdleConns(readers)
+		if err := rdb.Ping(); err != nil {
+			rdb.Close()
+			db.Close()
+			return nil, err
+		}
+		s.rdb = rdb
+	}
+	return s, nil
+}
+
+func damaged(path, why string) error {
+	return fmt.Errorf("%s is not a usable llm-hops database (%s): restore a copy, or move the file away to start empty", path, why)
 }
 
 // Close closes the file.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	var err error
+	if s.rdb != s.db {
+		err = s.rdb.Close()
+	}
+	return errors.Join(err, s.db.Close())
+}
 
-// Add inserts spans (a repeat of the same span replaces it) and refreshes the summaries of the traces
-// they touch. It returns the trace ids touched, sorted, for the live stream.
-func (s *Store) Add(spans []model.Span) ([]string, error) { return s.add(spans, true) }
+// Dropped is how many spans were not stored since the process started because their trace was at
+// MaxSpansPerTrace.
+func (s *Store) Dropped() int64 { return s.dropped.Load() }
+
+// AddResult is what an insert did.
+type AddResult struct {
+	Touched []string // the trace ids written to, sorted, for the live stream
+	Dropped int      // spans not stored: their trace is at MaxSpansPerTrace
+	Full    []string // the traces that were at the cap, sorted
+}
+
+// Add inserts spans (a repeat of the same trace_id and span_id replaces the stored span) and refreshes the
+// summaries of the traces they touch. It returns the trace ids touched, sorted, for the live stream.
+func (s *Store) Add(spans []model.Span) ([]string, error) {
+	r, err := s.add(spans, true)
+	return r.Touched, err
+}
 
 // AddIfAbsent inserts spans that are not there yet and leaves existing ones alone: for spans derived from
 // a log when the service may also post its own, exact ones, which must win whichever arrives first.
-func (s *Store) AddIfAbsent(spans []model.Span) ([]string, error) { return s.add(spans, false) }
+func (s *Store) AddIfAbsent(spans []model.Span) ([]string, error) {
+	r, err := s.add(spans, false)
+	return r.Touched, err
+}
 
-func (s *Store) add(spans []model.Span, replace bool) ([]string, error) {
+// AddReport is Add or AddIfAbsent for a caller that tells its sender what was dropped at the cap.
+func (s *Store) AddReport(spans []model.Span, ifAbsent bool) (AddResult, error) {
+	return s.add(spans, !ifAbsent)
+}
+
+func (s *Store) add(spans []model.Span, replace bool) (AddResult, error) {
+	var res AddResult
 	if len(spans) == 0 {
-		return nil, nil
+		return res, nil
 	}
-	set := map[string]bool{}
+	perTrace := map[string]int{}
 	for _, sp := range spans {
-		set[sp.TraceID] = true
+		perTrace[sp.TraceID]++
 	}
-	touched := make([]string, 0, len(set))
-	for id := range set {
-		touched = append(touched, id)
+	ids := make([]string, 0, len(perTrace))
+	for id := range perTrace {
+		ids = append(ids, id)
 	}
-	sort.Strings(touched)
+	sort.Strings(ids)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op after Commit
+	// room holds, for the traces this batch could push over the cap, how many new spans still fit; the
+	// others (nearly all) skip the per-span check
+	room := map[string]int{}
+	if s.MaxSpansPerTrace > 0 {
+		for _, id := range ids {
+			var have int
+			if err := tx.QueryRow("SELECT count(*) FROM spans WHERE trace_id=?", id).Scan(&have); err != nil {
+				return res, err
+			}
+			if have+perTrace[id] > s.MaxSpansPerTrace {
+				room[id] = max(0, s.MaxSpansPerTrace-have)
+			}
+		}
+	}
 	verb := "REPLACE"
 	if !replace {
 		verb = "IGNORE"
 	}
 	stmt, err := tx.Prepare("INSERT OR " + verb + " INTO spans VALUES (?,?,?,?,?,?,?,?,?)")
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	defer stmt.Close()
+	written, full := map[string]bool{}, map[string]bool{}
 	for _, sp := range spans {
+		if left, capped := room[sp.TraceID]; capped {
+			var one int
+			err := tx.QueryRow("SELECT 1 FROM spans WHERE trace_id=? AND span_id=?", sp.TraceID, sp.SpanID).Scan(&one)
+			if err == sql.ErrNoRows {
+				if left == 0 {
+					res.Dropped++
+					full[sp.TraceID] = true
+					continue
+				}
+				room[sp.TraceID] = left - 1
+			} else if err != nil {
+				return res, err
+			}
+		}
 		attrs, _ := json.Marshal(sp.Attrs)
 		var parent any
 		if sp.ParentID != "" {
 			parent = sp.ParentID
 		}
 		if _, err := stmt.Exec(sp.TraceID, sp.SpanID, parent, sp.Service, sp.Name, sp.StartMS, sp.EndMS, sp.Status, string(attrs)); err != nil {
-			return nil, err
+			return res, err
 		}
+		written[sp.TraceID] = true
 	}
-	for _, id := range touched {
+	for _, id := range ids {
+		if full[id] {
+			res.Full = append(res.Full, id)
+		}
+		if !written[id] {
+			continue
+		}
+		res.Touched = append(res.Touched, id)
 		if err := refreshSummary(tx, id); err != nil {
-			return nil, err
+			return AddResult{}, err
 		}
 	}
-	return touched, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return AddResult{}, err
+	}
+	s.dropped.Add(int64(res.Dropped))
+	return res, nil
 }
 
 type spanRow struct {
@@ -233,15 +376,15 @@ func (s *Store) Prune(keepMS, nowMS int64) (int64, error) {
 // Filter narrows the trace list.
 type Filter struct {
 	Since, Until      *int64
-	Limit             int
+	Limit, Offset     int
 	Model, Service    string
 	Status, Client, Q string
 	MinMS             *int64
 	Kind              string // "" = requests only (no loads or unloads); "load"; "any"
+	Sort              string // "" = newest first; "duration" = slowest first
 }
 
-// Traces lists trace summaries, newest first.
-func (s *Store) Traces(f Filter) ([]model.TraceSummary, error) {
+func (f Filter) where() (string, []any) {
 	where := []string{"1=1"}
 	var args []any
 	if f.Since != nil {
@@ -285,6 +428,13 @@ func (s *Store) Traces(f Filter) ([]model.TraceSummary, error) {
 		like := "%" + f.Q + "%"
 		args = append(args, like, like, like)
 	}
+	return strings.Join(where, " AND "), args
+}
+
+// Traces lists trace summaries: newest first, or slowest first with Sort "duration" (the whole window is
+// ranked, not a page of it). Offset skips rows, for the next page.
+func (s *Store) Traces(ctx context.Context, f Filter) ([]model.TraceSummary, error) {
+	where, args := f.where()
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 200
@@ -292,9 +442,13 @@ func (s *Store) Traces(f Filter) ([]model.TraceSummary, error) {
 	if limit > 5000 {
 		limit = 5000
 	}
-	args = append(args, limit)
-	rows, err := s.db.Query("SELECT trace_id,start_ms,end_ms,service,name,status,spans,attrs FROM traces WHERE "+
-		strings.Join(where, " AND ")+" ORDER BY start_ms DESC LIMIT ?", args...)
+	order := "start_ms DESC"
+	if f.Sort == "duration" {
+		order = "end_ms - start_ms DESC, start_ms DESC"
+	}
+	args = append(args, limit, max(0, f.Offset))
+	rows, err := s.rdb.QueryContext(ctx, "SELECT trace_id,start_ms,end_ms,service,name,status,spans,attrs FROM traces WHERE "+
+		where+" ORDER BY "+order+" LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +462,14 @@ func (s *Store) Traces(f Filter) ([]model.TraceSummary, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// CountTraces is how many traces the filter matches, whatever its Limit and Offset.
+func (s *Store) CountTraces(ctx context.Context, f Filter) (int, error) {
+	where, args := f.where()
+	var n int
+	err := s.rdb.QueryRowContext(ctx, "SELECT count(*) FROM traces WHERE "+where, args...).Scan(&n)
+	return n, err
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -325,8 +487,8 @@ func scanSummary(r scanner) (model.TraceSummary, error) {
 }
 
 // Summary returns one trace's row, or nil.
-func (s *Store) Summary(traceID string) (*model.TraceSummary, error) {
-	t, err := scanSummary(s.db.QueryRow("SELECT trace_id,start_ms,end_ms,service,name,status,spans,attrs FROM traces WHERE trace_id=?", traceID))
+func (s *Store) Summary(ctx context.Context, traceID string) (*model.TraceSummary, error) {
+	t, err := scanSummary(s.rdb.QueryRowContext(ctx, "SELECT trace_id,start_ms,end_ms,service,name,status,spans,attrs FROM traces WHERE trace_id=?", traceID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -336,10 +498,13 @@ func (s *Store) Summary(traceID string) (*model.TraceSummary, error) {
 	return &t, nil
 }
 
-// Trace returns a trace's spans, by start time.
-func (s *Store) Trace(traceID string) ([]model.Span, error) {
-	rows, err := s.db.Query("SELECT trace_id,span_id,COALESCE(parent_id,''),service,name,start_ms,end_ms,status,attrs "+
-		"FROM spans WHERE trace_id=? ORDER BY start_ms, end_ms DESC", traceID)
+// Trace returns a trace's spans, by start time: all of them, or the first limit when limit is positive.
+func (s *Store) Trace(ctx context.Context, traceID string, limit int) ([]model.Span, error) {
+	if limit <= 0 {
+		limit = -1 // SQLite: no limit
+	}
+	rows, err := s.rdb.QueryContext(ctx, "SELECT trace_id,span_id,COALESCE(parent_id,''),service,name,start_ms,end_ms,status,attrs "+
+		"FROM spans WHERE trace_id=? ORDER BY start_ms, end_ms DESC LIMIT ?", traceID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -415,14 +580,21 @@ type Stats struct {
 	Models        []ModelStat        `json:"models"`
 }
 
+// "where the time goes" counts leaf hops only: a span with children is the sum of them, and a nested
+// "request" is another service's root, not a hop. The NOT EXISTS is answered by the index
+// spans(trace_id, parent_id); without it every span scans its whole trace (quadratic in spans per trace).
+const leafHopsSQL = "SELECT s.name, s.end_ms - s.start_ms FROM spans s JOIN traces t ON t.trace_id = s.trace_id " +
+	"WHERE t.start_ms >= ? AND t.start_ms < ? AND s.parent_id IS NOT NULL AND s.name != 'request' " +
+	"AND NOT EXISTS (SELECT 1 FROM spans c WHERE c.trace_id = s.trace_id AND c.parent_id = s.span_id)"
+
 // Stats computes counts, percentiles per hop, requests per bucket and per-model rows for a window.
-func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
+func (s *Store) Stats(ctx context.Context, sinceMS, untilMS, bucketMS int64) (Stats, error) {
 	if bucketMS < 1000 {
 		bucketMS = 1000
 	}
 	st := Stats{SinceMS: sinceMS, UntilMS: untilMS, BucketMS: bucketMS, Hops: map[string]HopStat{}, Buckets: []Bucket{}, Models: []ModelStat{}, Backends: []BackendStat{}}
 	perBackend := map[string]*BackendStat{}
-	rows, err := s.db.Query("SELECT start_ms, end_ms, status, attrs FROM traces WHERE start_ms >= ? AND start_ms < ? ORDER BY start_ms", sinceMS, untilMS)
+	rows, err := s.rdb.QueryContext(ctx, "SELECT start_ms, end_ms, status, attrs FROM traces WHERE start_ms >= ? AND start_ms < ? ORDER BY start_ms", sinceMS, untilMS)
 	if err != nil {
 		return st, err
 	}
@@ -513,17 +685,17 @@ func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
 			prevModel = m
 		}
 	}
+	if err := rows.Err(); err != nil { // a cancelled request ends the loop early: not a short answer
+		rows.Close()
+		return st, err
+	}
 	rows.Close()
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
 	st.P50MS, st.P95MS = pct(durations, 0.5), pct(durations, 0.95)
 	if len(durations) > 0 {
 		st.MaxMS = durations[len(durations)-1]
 	}
-	// "where the time goes" counts leaf hops only: a span with children is the sum of them, and a nested
-	// "request" is another service's root, not a hop
-	hops, err := s.db.Query("SELECT s.name, s.end_ms - s.start_ms FROM spans s JOIN traces t ON t.trace_id = s.trace_id "+
-		"WHERE t.start_ms >= ? AND t.start_ms < ? AND s.parent_id IS NOT NULL AND s.name != 'request' "+
-		"AND NOT EXISTS (SELECT 1 FROM spans c WHERE c.trace_id = s.trace_id AND c.parent_id = s.span_id)", sinceMS, untilMS)
+	hops, err := s.rdb.QueryContext(ctx, leafHopsSQL, sinceMS, untilMS)
 	if err != nil {
 		return st, err
 	}
@@ -536,6 +708,10 @@ func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
 			return st, err
 		}
 		perHop[name] = append(perHop[name], max(0, d))
+	}
+	if err := hops.Err(); err != nil {
+		hops.Close()
+		return st, err
 	}
 	hops.Close()
 	for name, v := range perHop {
@@ -563,7 +739,7 @@ func (s *Store) Stats(sinceMS, untilMS, bucketMS int64) (Stats, error) {
 		}
 		return st.Backends[i].Requests > st.Backends[j].Requests
 	})
-	if err := s.mergeDaily(&st, sinceMS, untilMS); err != nil {
+	if err := s.mergeDaily(ctx, &st, sinceMS, untilMS); err != nil {
 		return st, err
 	}
 	return st, nil
@@ -578,8 +754,8 @@ type Edge struct {
 }
 
 // Edges aggregates the parent→child hops of a window by service and name.
-func (s *Store) Edges(sinceMS, untilMS int64) ([]Edge, error) {
-	rows, err := s.db.Query("SELECT p.service, p.name, s.service, s.name, count(*), avg(s.end_ms - s.start_ms) "+
+func (s *Store) Edges(ctx context.Context, sinceMS, untilMS int64) ([]Edge, error) {
+	rows, err := s.rdb.QueryContext(ctx, "SELECT p.service, p.name, s.service, s.name, count(*), avg(s.end_ms - s.start_ms) "+
 		"FROM spans s JOIN spans p ON p.trace_id = s.trace_id AND p.span_id = s.parent_id "+
 		"JOIN traces t ON t.trace_id = s.trace_id WHERE t.start_ms >= ? AND t.start_ms < ? GROUP BY 1,2,3,4", sinceMS, untilMS)
 	if err != nil {
@@ -607,8 +783,8 @@ type ServiceStat struct {
 }
 
 // Services lists the services seen in a window.
-func (s *Store) Services(sinceMS, untilMS int64) ([]ServiceStat, error) {
-	rows, err := s.db.Query("SELECT s.service, count(DISTINCT s.trace_id), COALESCE(sum(s.status='error'),0) FROM spans s "+
+func (s *Store) Services(ctx context.Context, sinceMS, untilMS int64) ([]ServiceStat, error) {
+	rows, err := s.rdb.QueryContext(ctx, "SELECT s.service, count(DISTINCT s.trace_id), COALESCE(sum(s.status='error'),0) FROM spans s "+
 		"JOIN traces t ON t.trace_id = s.trace_id WHERE t.start_ms >= ? AND t.start_ms < ? GROUP BY 1 ORDER BY 1", sinceMS, untilMS)
 	if err != nil {
 		return nil, err
@@ -626,10 +802,10 @@ func (s *Store) Services(sinceMS, untilMS int64) ([]ServiceStat, error) {
 }
 
 // Facets lists the distinct values the filters can take in a window.
-func (s *Store) Facets(sinceMS, untilMS int64) (map[string][]string, error) {
+func (s *Store) Facets(ctx context.Context, sinceMS, untilMS int64) (map[string][]string, error) {
 	out := map[string][]string{}
 	for _, key := range []string{"model", "client", "wire", "role"} {
-		rows, err := s.db.Query(fmt.Sprintf("SELECT DISTINCT json_extract(attrs, '$.%s') FROM traces WHERE start_ms >= ? AND start_ms < ? "+
+		rows, err := s.rdb.QueryContext(ctx, fmt.Sprintf("SELECT DISTINCT json_extract(attrs, '$.%s') FROM traces WHERE start_ms >= ? AND start_ms < ? "+
 			"AND json_extract(attrs, '$.%s') IS NOT NULL ORDER BY 1", key, key), sinceMS, untilMS)
 		if err != nil {
 			return nil, err
@@ -643,10 +819,14 @@ func (s *Store) Facets(sinceMS, untilMS int64) (map[string][]string, error) {
 			}
 			vals = append(vals, fmt.Sprintf("%v", v))
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
 		rows.Close()
 		out[key] = vals
 	}
-	rows, err := s.db.Query("SELECT DISTINCT service FROM traces WHERE start_ms >= ? AND start_ms < ? ORDER BY 1", sinceMS, untilMS)
+	rows, err := s.rdb.QueryContext(ctx, "SELECT DISTINCT service FROM traces WHERE start_ms >= ? AND start_ms < ? ORDER BY 1", sinceMS, untilMS)
 	if err != nil {
 		return nil, err
 	}
@@ -660,7 +840,7 @@ func (s *Store) Facets(sinceMS, untilMS int64) (map[string][]string, error) {
 		svcs = append(svcs, v)
 	}
 	out["service"] = svcs
-	return out, nil
+	return out, rows.Err()
 }
 
 // Load is one model load from Ollama's journal, as the timeline draws it.
@@ -672,8 +852,8 @@ type Load struct {
 
 // Loads lists the model loads in a window, oldest first, plus the last one before it (what was loaded
 // when the window opened).
-func (s *Store) Loads(sinceMS, untilMS int64) ([]Load, error) {
-	rows, err := s.db.Query("SELECT start_ms, end_ms, json_extract(attrs, '$.model') FROM traces "+
+func (s *Store) Loads(ctx context.Context, sinceMS, untilMS int64) ([]Load, error) {
+	rows, err := s.rdb.QueryContext(ctx, "SELECT start_ms, end_ms, json_extract(attrs, '$.model') FROM traces "+
 		"WHERE json_extract(attrs, '$.kind') = 'load' AND start_ms < ? AND (start_ms >= ? OR start_ms = "+
 		"(SELECT max(start_ms) FROM traces WHERE json_extract(attrs, '$.kind') = 'load' AND start_ms < ?)) ORDER BY start_ms",
 		untilMS, sinceMS, sinceMS)

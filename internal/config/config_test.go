@@ -50,3 +50,19 @@ func TestDefaultsFileAndEnvironment(t *testing.T) {
 		t.Fatal("keep_days 0 must fail")
 	}
 }
+
+func TestTheLimitsHaveDefaultsAndAreChecked(t *testing.T) {
+	c, err := Load("", false)
+	if err != nil || c.MaxSpansPerTrace != 5000 || c.MaxDBMB != 0 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	p := filepath.Join(t.TempDir(), "hops.toml")
+	os.WriteFile(p, []byte("max_spans_per_trace = 0\nmax_db_mb = 2048\n"), 0o600)
+	if c, err = Load(p, true); err != nil || c.MaxSpansPerTrace != 0 || c.MaxDBMB != 2048 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	os.WriteFile(p, []byte("max_spans_per_trace = -1\n"), 0o600)
+	if _, err = Load(p, true); err == nil {
+		t.Fatal("a negative cap loaded")
+	}
+}

@@ -122,8 +122,8 @@ Tested with Claude Code. The Grok Build block follows xAI's documentation and ha
 | Call | Gives |
 |---|---|
 | `POST /api/v1/spans` | a list of spans, or `{"spans": [...]}`; answers accepted, rejected, the trace ids touched |
-| `GET /api/v1/traces?since&until&limit&model&client&service&status&min_ms&q` | trace summaries, newest first |
-| `GET /api/v1/traces/{id}` | one trace: summary and every span |
+| `GET /api/v1/traces?since&until&limit&offset&sort&count&model&client&service&status&min_ms&q` | trace summaries, newest first; `sort=duration` for slowest first, `count=1` adds the `total` that match |
+| `GET /api/v1/traces/{id}?max_spans` | one trace: summary and every span, or its first `max_spans` |
 | `GET /api/v1/stats?since&until&bucket_ms` | counts, p50/p95/max, per-hop and per-model rows, requests per bucket, model switches |
 | `GET /api/v1/flow?since&until` | the services and the aggregated hops between them |
 | `GET /api/v1/facets?since&until` | the values the filters can take |
@@ -133,7 +133,13 @@ Tested with Claude Code. The Grok Build block follows xAI's documentation and ha
 | `GET /metrics` | Prometheus text: the last five minutes, per hop and per model |
 
 Times are milliseconds since the epoch. Spans older than `keep_days` (14) are rolled up into daily statistics
-per model and dropped every ten minutes; the stats view shows rolled-up days too, marked approximate.
+per model and dropped, at the start and every ten minutes; the stats view shows rolled-up days too, marked approximate.
+
+Limits, so one sender cannot hurt the rest: an id is at most 64 bytes and a longer one is rejected, not
+shortened; a span starts no more than a day ahead and lasts at most 24 hours; a trace holds at most
+`max_spans_per_trace` spans (5000; more are dropped, and the answer and `llm_hops_spans_dropped_total` say so).
+The answer to a `POST` gives the reasons for what it rejected. A span sent again with the same trace and span
+id replaces the earlier one. The details are in [docs/deploy.md](docs/deploy.md#limits-and-the-size-of-the-file).
 
 ## Running it for real
 

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // What the API answers, reduced to what the tools print. Kept separate from the server's types so the MCP
@@ -121,19 +122,24 @@ type traceSummary struct {
 
 type tracesOut struct {
 	Traces []traceSummary `json:"traces"`
+	Total  *int           `json:"total"` // how many match in all; absent from a server that does not count
 }
 
 func (t *tracesOut) sortByDuration() {
-	sort.Slice(t.Traces, func(i, j int) bool { return t.Traces[i].DurationMS > t.Traces[j].DurationMS })
+	sort.SliceStable(t.Traces, func(i, j int) bool { return t.Traces[i].DurationMS > t.Traces[j].DurationMS })
 }
 
-func (t tracesOut) text() string {
+// text prints the rows, then where this page sits among the matches and how to get the next one.
+func (t tracesOut) text(offset int, slowest bool) string {
 	if len(t.Traces) == 0 {
+		if offset > 0 && t.Total != nil && *t.Total > 0 {
+			return fmt.Sprintf("No more requests: %d match, and offset is %d.", *t.Total, offset)
+		}
 		return "No requests match."
 	}
 	var b strings.Builder
 	for _, tr := range t.Traces {
-		fmt.Fprintf(&b, "%s  %-8s %-10s %-26s %-5s %8s", when(tr.StartMS), tr.Service, s(tr.Attrs["client"]), s(tr.Attrs["model"]), tr.Status, ms(tr.DurationMS))
+		fmt.Fprintf(&b, "%s  %-8s %-10s %-26s %-5s %8s", when(tr.StartMS), tr.Service, cutText(s(tr.Attrs["client"]), 40), cutText(s(tr.Attrs["model"]), 60), tr.Status, ms(tr.DurationMS))
 		if v, ok := tr.Attrs["queue_ms"].(float64); ok && v > 0 {
 			fmt.Fprintf(&b, "  queue %s", ms(int64(v)))
 		}
@@ -141,9 +147,25 @@ func (t tracesOut) text() string {
 			fmt.Fprintf(&b, "  first token %s", ms(int64(v)))
 		}
 		if v, ok := tr.Attrs["error"].(string); ok && v != "" {
-			fmt.Fprintf(&b, "  error=%s", v)
+			fmt.Fprintf(&b, "  error=%s", cutText(v, maxAttrValue))
 		}
 		fmt.Fprintf(&b, "  id=%s\n", tr.TraceID)
+	}
+	if t.Total != nil {
+		order := "newest first"
+		if slowest {
+			order = "slowest first"
+		}
+		last := offset + len(t.Traces)
+		fmt.Fprintf(&b, "Showing %d-%d of %d, %s.", offset+1, last, *t.Total, order)
+		if more := *t.Total - last; more > 0 {
+			if slowest {
+				fmt.Fprintf(&b, " %d more match: raise limit (at most %d).", more, maxTraces)
+			} else {
+				fmt.Fprintf(&b, " %d more match: call again with offset=%d.", more, last)
+			}
+		}
+		b.WriteByte('\n')
 	}
 	return b.String()
 }
@@ -162,39 +184,58 @@ type traceOut struct {
 	} `json:"spans"`
 }
 
-func (t traceOut) text() string {
+// What one span's attributes may take in the waterfall: a value is cut, and past the budget the rest are
+// counted, not printed.
+const (
+	maxAttrValue = 200
+	maxAttrText  = 1000
+	maxDepth     = 20
+)
+
+// text prints the waterfall: at most maxSpans spans, with a note when the trace has more.
+func (t traceOut) text(maxSpans int) string {
 	if len(t.Spans) == 0 {
 		return "No such trace."
+	}
+	total := len(t.Spans)
+	if t.Trace != nil && t.Trace.Spans > total {
+		total = t.Trace.Spans
+	}
+	if maxSpans > 0 && len(t.Spans) > maxSpans { // a server that does not cut for us
+		t.Spans = t.Spans[:maxSpans]
 	}
 	var b strings.Builder
 	if t.Trace != nil {
 		fmt.Fprintf(&b, "Trace %s: %s, %s, %d spans, status %s\n", t.Trace.TraceID, when(t.Trace.StartMS), ms(t.Trace.DurationMS), t.Trace.Spans, t.Trace.Status)
 	}
 	t0 := t.Spans[0].StartMS
+	parent := make(map[string]string, len(t.Spans))
 	for _, sp := range t.Spans {
 		if sp.StartMS < t0 {
 			t0 = sp.StartMS
 		}
+		parent[sp.SpanID] = sp.ParentID
 	}
-	depth := map[string]int{}
-	byID := map[string]bool{}
-	for _, sp := range t.Spans {
-		byID[sp.SpanID] = true
-	}
-	for _, sp := range t.Spans {
-		d, p := 0, sp.ParentID
-		for p != "" && byID[p] && d < 20 {
-			d++
-			var next string
-			for _, q := range t.Spans {
-				if q.SpanID == p {
-					next = q.ParentID
-					break
-				}
-			}
-			p = next
+	// a span's depth is its parent's plus one; the memo makes a long chain one step a span, and the cap
+	// keeps the indent readable and ends a cycle
+	depth := make(map[string]int, len(t.Spans))
+	var depthOf func(id string, guard int) int
+	depthOf = func(id string, guard int) int {
+		if d, ok := depth[id]; ok {
+			return d
 		}
-		depth[sp.SpanID] = d
+		d := 0
+		if p, ok := parent[id]; ok && p != "" && guard < maxDepth {
+			if _, known := parent[p]; known {
+				d = min(depthOf(p, guard+1)+1, maxDepth)
+			}
+		}
+		depth[id] = d
+		return d
+	}
+	// parents first (the spans come by start time), so the recursion stays shallow
+	for _, sp := range t.Spans {
+		depthOf(sp.SpanID, 0)
 	}
 	for _, sp := range t.Spans {
 		fmt.Fprintf(&b, "%s%-10s %-10s +%-8s %-8s %s", strings.Repeat("  ", depth[sp.SpanID]), sp.Service, sp.Name, ms(sp.StartMS-t0), ms(sp.EndMS-sp.StartMS), sp.Status)
@@ -203,12 +244,37 @@ func (t traceOut) text() string {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(&b, " %s=%v", k, sp.Attrs[k])
+		used := 0
+		for i, k := range keys {
+			kv := fmt.Sprintf(" %s=%s", k, cutText(fmt.Sprintf("%v", sp.Attrs[k]), maxAttrValue))
+			if used+len(kv) > maxAttrText {
+				fmt.Fprintf(&b, " (+%d more attributes)", len(keys)-i)
+				break
+			}
+			used += len(kv)
+			b.WriteString(kv)
 		}
 		b.WriteByte('\n')
 	}
+	if more := total - len(t.Spans); more > 0 {
+		fmt.Fprintf(&b, "Truncated: the first %d of %d spans by start time, %d more not shown", len(t.Spans), total, more)
+		if len(t.Spans) < maxSpansCap {
+			fmt.Fprintf(&b, " (max_spans goes up to %d)", maxSpansCap)
+		}
+		b.WriteString(".\n")
+	}
 	return b.String()
+}
+
+// cutText shortens a value for printing, on a character boundary, and marks the cut.
+func cutText(v string, n int) string {
+	if len(v) <= n {
+		return v
+	}
+	for n > 0 && !utf8.RuneStart(v[n]) {
+		n--
+	}
+	return v[:n] + "…"
 }
 
 func ms(v int64) string {

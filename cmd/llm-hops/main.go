@@ -9,6 +9,7 @@
 //	llm-hops export [-db hops.db] [-since MS] [-until MS] > spans.jsonl  every span, oldest first
 //	llm-hops demo   [-to URL] [-n 300] [-live]                           synthetic traffic
 //	llm-hops bench  [-to URL] [-rate 10000] [-seconds 10]                a load test
+//	llm-hops vacuum [-db hops.db]                                        rebuild an older file so it shrinks after pruning (server stopped)
 //	llm-hops config                                                      an example configuration file
 //	llm-hops version
 package main
@@ -22,9 +23,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,6 +44,27 @@ import (
 )
 
 var version = "dev" // set by the Makefile from the git tag
+
+// versionString is the stamped version, or for a binary built without the Makefile (`go install
+// github.com/YauhenBichel/llm-hops/cmd/llm-hops@v0.2.4`) the module version Go recorded in it.
+func versionString() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v := moduleVersion(bi.Main.Version); v != "" {
+			return v
+		}
+	}
+	return version
+}
+
+func moduleVersion(v string) string {
+	if v == "" || v == "(devel)" {
+		return ""
+	}
+	return strings.TrimPrefix(v, "v")
+}
 
 type multi []string
 
@@ -69,10 +93,12 @@ func main() {
 		err = bench(os.Args[2:])
 	case "mcp":
 		err = mcpCmd(os.Args[2:])
+	case "vacuum":
+		err = vacuum(os.Args[2:])
 	case "config":
 		fmt.Print(config.Example)
 	case "version", "-v", "--version":
-		fmt.Println("llm-hops", version)
+		fmt.Println("llm-hops", versionString())
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -94,6 +120,7 @@ func usage() {
   llm-hops demo   [-to http://127.0.0.1:11602] [-n 300] [-live]
   llm-hops bench  [-to http://127.0.0.1:11602] [-rate 10000] [-seconds 10]
   llm-hops mcp    [-to http://127.0.0.1:11602]             a Model Context Protocol server over stdio (Claude Code, Cursor, ...)
+  llm-hops vacuum [-db hops.db]                            rebuild a file made by v0.2.4 or older so it shrinks after pruning; stop the server first
   llm-hops config                                          print an example configuration file
   llm-hops version
 
@@ -113,6 +140,8 @@ func loadConfig(fs *flag.FlagSet, args []string) (config.Config, error) {
 	keepDays := fs.Float64("keep-days", 0, "spans older than this become daily statistics")
 	title := fs.String("title", "", "the page's title")
 	ollamaJournal := fs.Bool("ollama-journal", false, "follow journalctl -u ollama: every model load becomes a trace")
+	maxSpans := fs.Int("max-spans-per-trace", 0, "spans one trace may hold; more are dropped and counted (0: no cap; default 5000)")
+	maxDBMB := fs.Int64("max-db-mb", 0, "roll up and drop the oldest days when the data is larger than this (0: no limit)")
 	if err := fs.Parse(args); err != nil {
 		return config.Config{}, err
 	}
@@ -140,10 +169,17 @@ func loadConfig(fs *flag.FlagSet, args []string) (config.Config, error) {
 			cfg.Title = *title
 		case "ollama-journal":
 			cfg.OllamaJournal = *ollamaJournal
+		case "max-spans-per-trace":
+			cfg.MaxSpansPerTrace = *maxSpans
+		case "max-db-mb":
+			cfg.MaxDBMB = *maxDBMB
 		}
 	})
 	if cfg.KeepDays <= 0 {
 		return cfg, errors.New("keep-days must be positive")
+	}
+	if cfg.MaxSpansPerTrace < 0 || cfg.MaxDBMB < 0 {
+		return cfg, errors.New("max-spans-per-trace and max-db-mb must not be negative")
 	}
 	return cfg, nil
 }
@@ -159,6 +195,11 @@ func serve(args []string) error {
 		return err
 	}
 	defer st.Close()
+	st.MaxSpansPerTrace = cfg.MaxSpansPerTrace
+	if !st.Shrinks() {
+		log.Printf("%s was made by v0.2.4 or older: pruning frees room inside the file but the file does not get smaller. "+
+			"To change that once, stop the server and run: llm-hops vacuum -db %s", cfg.DB, cfg.DB)
+	}
 	srv := server.New(st, server.NewBroadcast())
 	srv.Token = cfg.Token
 	srv.Title = cfg.Title
@@ -243,21 +284,23 @@ func serve(args []string) error {
 			}
 		}()
 	}
+	// bind before anything is announced or started on the data: a taken port must fail here, not after
+	// a line that says the server is up
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return err
+	}
 	go func() {
-		for {
+		for { // once at the start (a server restarted daily would never prune otherwise), then every ten minutes
+			maintain(st, cfg)
 			select {
 			case <-stop:
 				return
 			case <-time.After(10 * time.Minute):
-				if n, err := st.RollupAndPrune(int64(cfg.KeepDays*86_400_000), model.NowMS()); err == nil && n > 0 {
-					log.Printf("rolled up and pruned %d traces older than %.1f days", n, cfg.KeepDays)
-				} else if err != nil {
-					log.Printf("rollup: %v", err)
-				}
 			}
 		}
 	}()
-	h := &http.Server{Addr: cfg.Listen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
+	h := &http.Server{Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	h.RegisterOnShutdown(srv.CloseStreams)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -265,17 +308,59 @@ func serve(args []string) error {
 	if cfg.Token != "" {
 		guarded = ", a token is required"
 	}
-	log.Printf("llm-hops %s on http://%s/  (db %s, keep %.0f days%s)", version, cfg.Listen, cfg.DB, cfg.KeepDays, guarded)
-	return serveUntil(ctx, h, stop, shutdownGrace)
+	log.Printf("llm-hops %s on http://%s/  (db %s, keep %.0f days%s)", versionString(), ln.Addr(), cfg.DB, cfg.KeepDays, guarded)
+	if cfg.Token == "" && !loopback(ln.Addr()) {
+		log.Printf("warning: listening on %s without a token: anyone who can reach this address can read the traces and send spans. "+
+			"Set token in the configuration or LLM_HOPS_TOKEN, or listen on 127.0.0.1", ln.Addr())
+	}
+	return serveUntil(ctx, h, ln, stop, shutdownGrace)
+}
+
+// loopback says whether the address can only be reached from this machine.
+func loopback(a net.Addr) bool {
+	tcp, ok := a.(*net.TCPAddr)
+	return ok && tcp.IP.IsLoopback()
+}
+
+// maintain keeps the file within keep_days and max_db_mb, and hands the freed pages back to the disk.
+func maintain(st *store.Store, cfg config.Config) {
+	pruned := false
+	if n, err := st.RollupAndPrune(int64(cfg.KeepDays*86_400_000), model.NowMS()); err != nil {
+		log.Printf("rollup: %v", err)
+	} else if n > 0 {
+		pruned = true
+		log.Printf("rolled up and pruned %d traces older than %.1f days", n, cfg.KeepDays)
+	}
+	if cfg.MaxDBMB > 0 {
+		n, over, err := st.PruneToSize(cfg.MaxDBMB<<20, model.NowMS())
+		if err != nil {
+			log.Printf("max_db_mb: %v", err)
+		}
+		if n > 0 {
+			pruned = true
+			log.Printf("rolled up and pruned %d traces of the oldest days to stay under max_db_mb = %d", n, cfg.MaxDBMB)
+		}
+		if over {
+			log.Printf("warning: today's traces alone are larger than max_db_mb = %d; a day in progress is never pruned", cfg.MaxDBMB)
+		}
+	}
+	if !pruned {
+		return
+	}
+	if freed, err := st.FreePages(); err != nil {
+		log.Printf("freeing pages: %v", err)
+	} else if freed > 0 {
+		log.Printf("gave %d MB back to the disk", freed>>20)
+	}
 }
 
 // shutdownGrace is how long requests in flight get to finish after a signal.
 const shutdownGrace = 5 * time.Second
 
-// serveUntil serves until ctx ends, then closes stop and drains. ListenAndServe returns the moment
+// serveUntil serves on ln until ctx ends, then closes stop and drains. Serve returns the moment
 // Shutdown begins, so it waits for Shutdown as well: returning earlier would end the process with
 // requests still running.
-func serveUntil(ctx context.Context, h *http.Server, stop chan struct{}, grace time.Duration) error {
+func serveUntil(ctx context.Context, h *http.Server, ln net.Listener, stop chan struct{}, grace time.Duration) error {
 	drained := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
@@ -284,7 +369,7 @@ func serveUntil(ctx context.Context, h *http.Server, stop chan struct{}, grace t
 		defer c()
 		drained <- h.Shutdown(shutdown)
 	}()
-	if err := h.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if err := h.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	if err := <-drained; err != nil {
@@ -410,7 +495,7 @@ func export(args []string) error {
 	defer w.Flush()
 	enc := json.NewEncoder(w)
 	n := 0
-	err = st.ExportSpans(*since, *until, func(sp model.Span) error {
+	err = st.ExportSpans(context.Background(), *since, *until, func(sp model.Span) error {
 		n++
 		return enc.Encode(sp)
 	})
@@ -452,6 +537,21 @@ func demoCmd(args []string) error {
 	}
 }
 
+// vacuum rebuilds a database file so that it gives room back to the disk after pruning from then on.
+func vacuum(args []string) error {
+	fs := flag.NewFlagSet("vacuum", flag.ExitOnError)
+	db := fs.String("db", "hops.db", "the SQLite file; the server that uses it must be stopped")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	before, after, err := store.Vacuum(*db)
+	if err != nil {
+		return err
+	}
+	log.Printf("%s: %d MB before, %d MB now; from here on it shrinks after every prune", *db, before>>20, after>>20)
+	return nil
+}
+
 // mcpCmd serves the Model Context Protocol over stdin and stdout, against a running llm-hops server.
 func mcpCmd(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
@@ -460,7 +560,7 @@ func mcpCmd(args []string) error {
 		return err
 	}
 	log.SetOutput(os.Stderr)
-	s := &mcp.Server{Base: c.to, Token: c.token, Version: version}
+	s := &mcp.Server{Base: c.to, Token: c.token, Version: versionString()}
 	return s.Serve(os.Stdin, os.Stdout)
 }
 

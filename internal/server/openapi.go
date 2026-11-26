@@ -29,18 +29,22 @@ const openAPI = `{
   "paths": {
     "/api/v1/spans": {"post": {"summary": "Send spans", "requestBody": {"required": true, "content": {"application/json": {"schema": {"oneOf": [
         {"type": "array", "items": {"$ref": "#/components/schemas/Span"}}, {"type": "object", "properties": {"spans": {"type": "array", "items": {"$ref": "#/components/schemas/Span"}}}}]}}}},
-      "responses": {"200": {"description": "accepted, rejected, and the trace ids touched"}}}},
+      "responses": {"200": {"description": "accepted, rejected (with errors: why, the first few reasons), the trace ids touched; dropped and a note when a trace was at max_spans_per_trace. Ids are at most 64 bytes; a span with a longer one is rejected, not shortened. A span sent again with the same trace_id and span_id replaces the stored one"}}}},
     "/v1/traces": {"post": {"summary": "OpenTelemetry OTLP/JSON traces (any OTel SDK's OTLP HTTP exporter, JSON encoding)",
       "responses": {"200": {"description": "accepted and skipped counts"}}}},
-    "/api/v1/traces": {"get": {"summary": "Trace summaries, newest first", "parameters": [
+    "/api/v1/traces": {"get": {"summary": "Trace summaries, newest first (or slowest first with sort=duration)", "parameters": [
         {"name": "since", "in": "query", "schema": {"type": "integer"}}, {"name": "until", "in": "query", "schema": {"type": "integer"}},
         {"name": "limit", "in": "query", "schema": {"type": "integer", "maximum": 5000}}, {"name": "model", "in": "query", "schema": {"type": "string"}},
         {"name": "client", "in": "query", "schema": {"type": "string"}}, {"name": "service", "in": "query", "schema": {"type": "string"}},
         {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["ok", "error"]}}, {"name": "min_ms", "in": "query", "schema": {"type": "integer"}},
-        {"name": "q", "in": "query", "schema": {"type": "string"}},
+        {"name": "q", "in": "query", "schema": {"type": "string", "maxLength": 200}},
+        {"name": "sort", "in": "query", "schema": {"type": "string", "enum": ["start", "duration"]}, "description": "start: newest first (default); duration: slowest first over the whole window"},
+        {"name": "offset", "in": "query", "schema": {"type": "integer"}, "description": "rows to skip, for the next page"},
+        {"name": "count", "in": "query", "schema": {"type": "string", "enum": ["1"]}, "description": "1: also answer total, how many traces match"},
         {"name": "kind", "in": "query", "schema": {"type": "string"}, "description": "empty: requests only; load; unload; any"}],
-      "responses": {"200": {"description": "traces", "content": {"application/json": {"schema": {"type": "object", "properties": {"traces": {"type": "array", "items": {"$ref": "#/components/schemas/TraceSummary"}}}}}}}}}},
-    "/api/v1/traces/{id}": {"get": {"summary": "One trace: summary and every span", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+      "responses": {"200": {"description": "traces", "content": {"application/json": {"schema": {"type": "object", "properties": {"traces": {"type": "array", "items": {"$ref": "#/components/schemas/TraceSummary"}}, "total": {"type": "integer", "description": "with count=1"}}}}}}}}},
+    "/api/v1/traces/{id}": {"get": {"summary": "One trace: summary and every span", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+        {"name": "max_spans", "in": "query", "schema": {"type": "integer"}, "description": "only the first so many spans by start time; trace.spans still says how many there are"}],
       "responses": {"200": {"description": "trace and spans"}, "404": {"description": "no such trace"}}}},
     "/api/v1/stats": {"get": {"summary": "Counts, percentiles, per hop, per model, per backend (local or cloud), requests per bucket", "parameters": [
         {"name": "since", "in": "query", "schema": {"type": "integer"}}, {"name": "until", "in": "query", "schema": {"type": "integer"}}, {"name": "bucket_ms", "in": "query", "schema": {"type": "integer"}}],

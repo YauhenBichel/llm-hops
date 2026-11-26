@@ -18,7 +18,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"time"
+	"unicode/utf8"
+)
+
+// What a sender must respect; Validate enforces it for every way in (the API, OTLP, an import).
+const (
+	// MaxIDLen is the longest trace_id, span_id or parent_id, in bytes. A longer one is rejected, never
+	// shortened: a shortened id could not be looked up again, and two ids with the same first 64 bytes
+	// would merge into one trace.
+	MaxIDLen = 64
+	// MaxSpanMS is the longest span: a longer one is a unit mix-up (seconds or nanoseconds sent as
+	// milliseconds) or a skewed clock, and would become the window's maximum.
+	MaxSpanMS = 24 * 3_600_000
+	// MaxAheadMS is how far in the future a span may start, for a sender whose clock runs ahead.
+	MaxAheadMS = 24 * 3_600_000
 )
 
 // Attrs is a flat map: strings, numbers, booleans or null.
@@ -76,6 +92,9 @@ func (s Span) Duration() int64 {
 }
 
 // Clean accepts a span written by any client: it rejects what would corrupt the store and tolerates the rest.
+// Ids are strings or numbers of at most MaxIDLen bytes without control characters; start_ms is not negative
+// and not more than MaxAheadMS in the future; a span lasts at most MaxSpanMS. Service, name and attributes
+// are cut to size instead.
 func Clean(raw json.RawMessage) (Span, error) {
 	var in struct {
 		TraceID  any            `json:"trace_id"`
@@ -89,23 +108,38 @@ func Clean(raw json.RawMessage) (Span, error) {
 		Attrs    map[string]any `json:"attrs"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return Span{}, err
+		return Span{}, errors.New("a span is a JSON object")
 	}
-	tid := str(in.TraceID)
+	var ids [3]string
+	for i, f := range []struct {
+		name string
+		v    any
+	}{{"trace_id", in.TraceID}, {"span_id", in.SpanID}, {"parent_id", in.ParentID}} {
+		switch f.v.(type) {
+		case nil, string, float64:
+			ids[i] = str(f.v)
+		default:
+			return Span{}, fmt.Errorf("%s must be a string", f.name)
+		}
+	}
 	start, ok := num(in.StartMS)
-	if tid == "" || !ok {
+	if ids[0] == "" || !ok {
 		return Span{}, errors.New("a span needs trace_id and start_ms")
 	}
 	end, ok := num(in.EndMS)
 	if !ok || end < start {
 		end = start
 	}
+	// checked as floats: converting 1e30 to an integer would wrap to an arbitrary time
+	if start < 0 || start > math.MaxInt64/2 || end > math.MaxInt64/2 {
+		return Span{}, errors.New("start_ms and end_ms are milliseconds since 1970, not negative")
+	}
 	s := Span{
-		TraceID:  cut(tid, 64),
-		SpanID:   cut(str(in.SpanID), 64),
-		ParentID: cut(str(in.ParentID), 64),
-		Service:  cut(str(in.Service), 64),
-		Name:     cut(str(in.Name), 64),
+		TraceID:  ids[0],
+		SpanID:   ids[1],
+		ParentID: ids[2],
+		Service:  cut(printable(str(in.Service)), 64),
+		Name:     cut(printable(str(in.Name)), 64),
 		StartMS:  int64(start),
 		EndMS:    int64(end),
 		Status:   "ok",
@@ -113,6 +147,9 @@ func Clean(raw json.RawMessage) (Span, error) {
 	}
 	if s.SpanID == "" {
 		s.SpanID = NewID(8)
+	}
+	if err := Validate(s, NowMS()); err != nil {
+		return Span{}, err
 	}
 	if s.Service == "" {
 		s.Service = "unknown"
@@ -134,6 +171,46 @@ func Clean(raw json.RawMessage) (Span, error) {
 	return s, nil
 }
 
+// Validate says why a span cannot be stored, or nil: the limits in this package's constants. The message
+// goes back to the sender.
+func Validate(s Span, nowMS int64) error {
+	if s.TraceID == "" {
+		return errors.New("a span needs trace_id and start_ms")
+	}
+	for _, f := range []struct{ name, v string }{{"trace_id", s.TraceID}, {"span_id", s.SpanID}, {"parent_id", s.ParentID}} {
+		if len(f.v) > MaxIDLen {
+			return fmt.Errorf("%s is longer than %d bytes (ids are stored whole, never shortened)", f.name, MaxIDLen)
+		}
+		if !utf8.ValidString(f.v) || strings.ContainsFunc(f.v, isControl) {
+			return fmt.Errorf("%s has a control character or is not UTF-8", f.name)
+		}
+	}
+	switch {
+	case s.StartMS < 0:
+		return errors.New("start_ms and end_ms are milliseconds since 1970, not negative")
+	case s.StartMS > nowMS+MaxAheadMS:
+		return errors.New("start_ms is more than a day in the future (milliseconds since 1970 are expected)")
+	case s.EndMS-s.StartMS > MaxSpanMS:
+		return errors.New("the span is longer than 24 hours (milliseconds are expected for start_ms and end_ms)")
+	}
+	return nil
+}
+
+func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
+
+// printable drops control characters, which a name or a service never needs.
+func printable(s string) string {
+	if !strings.ContainsFunc(s, isControl) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 func str(v any) string {
 	switch t := v.(type) {
 	case string:
@@ -152,16 +229,20 @@ func num(v any) (float64, bool) {
 		return t, true
 	case string:
 		var f float64
-		if _, err := fmt.Sscan(t, &f); err == nil {
+		if _, err := fmt.Sscan(t, &f); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 			return f, true
 		}
 	}
 	return 0, false
 }
 
+// cut shortens s to at most n bytes, never in the middle of a character.
 func cut(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

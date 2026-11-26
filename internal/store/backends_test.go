@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"testing"
 
 	"github.com/YauhenBichel/llm-hops/internal/model"
@@ -23,7 +24,7 @@ func TestBackendsSplitLocalFromCloud(t *testing.T) {
 		{TraceID: "d", SpanID: "r", Service: "gateway", Name: "request", StartMS: 1000, EndMS: 1500, Status: "ok",
 			Attrs: model.Attrs{"backend": "cpu", "model": "bge-m3", "prompt_tokens": 5.0}},
 	})
-	st, err := s.Stats(0, 10_000, 60_000)
+	st, err := s.Stats(context.Background(), 0, 10_000, 60_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +58,7 @@ func TestLoadsAreCountedAndNotRequests(t *testing.T) {
 		{TraceID: "l1", SpanID: "l1", Service: "ollama", Name: "load", StartMS: 1000, EndMS: 31000, Status: "ok", Attrs: model.Attrs{"model": "m", "kind": "load", "load_ms": 30000.0}},
 		{TraceID: "l2", SpanID: "l2", Service: "ollama", Name: "load", StartMS: 40000, EndMS: 50000, Status: "ok", Attrs: model.Attrs{"model": "n", "kind": "load"}},
 	})
-	st, _ := s.Stats(0, 100000, 60000)
+	st, _ := s.Stats(context.Background(), 0, 100000, 60000)
 	if st.Requests != 1 || st.Loads != 2 || st.LoadMS != 40000 || st.P50MS != 1000 {
 		t.Fatalf("%+v", st)
 	}
@@ -69,11 +70,11 @@ func TestLoadsIncludeTheOneBeforeTheWindow(t *testing.T) {
 		return model.Span{TraceID: id, SpanID: id, Service: "ollama", Name: "load", StartMS: a, EndMS: b, Status: "ok", Attrs: model.Attrs{"model": m, "kind": "load"}}
 	}
 	s.Add([]model.Span{mk("a", "x", 100, 200), mk("b", "y", 1000, 1100), mk("c", "x", 5000, 5100), mk("d", "z", 9000, 9100)})
-	loads, err := s.Loads(2000, 8000)
+	loads, err := s.Loads(context.Background(), 2000, 8000)
 	if err != nil || len(loads) != 2 || loads[0].Model != "y" || loads[1].Model != "x" {
 		t.Fatalf("%+v %v", loads, err)
 	}
-	loads, _ = s.Loads(50, 8000)
+	loads, _ = s.Loads(context.Background(), 50, 8000)
 	if len(loads) != 3 {
 		t.Fatalf("%+v", loads)
 	}
@@ -85,13 +86,13 @@ func TestTracesListLeavesLoadsOutUnlessAsked(t *testing.T) {
 		{TraceID: "r", SpanID: "r", Service: "gateway", Name: "request", StartMS: 1, EndMS: 2, Status: "ok", Attrs: model.Attrs{"model": "m"}},
 		{TraceID: "l", SpanID: "l", Service: "ollama", Name: "load", StartMS: 1, EndMS: 2, Status: "ok", Attrs: model.Attrs{"model": "m", "kind": "load"}},
 	})
-	if rows, _ := s.Traces(Filter{}); len(rows) != 1 || rows[0].TraceID != "r" {
+	if rows, _ := s.Traces(context.Background(), Filter{}); len(rows) != 1 || rows[0].TraceID != "r" {
 		t.Fatalf("default: %+v", rows)
 	}
-	if rows, _ := s.Traces(Filter{Kind: "load"}); len(rows) != 1 || rows[0].TraceID != "l" {
+	if rows, _ := s.Traces(context.Background(), Filter{Kind: "load"}); len(rows) != 1 || rows[0].TraceID != "l" {
 		t.Fatalf("load: %+v", rows)
 	}
-	if rows, _ := s.Traces(Filter{Kind: "any"}); len(rows) != 2 {
+	if rows, _ := s.Traces(context.Background(), Filter{Kind: "any"}); len(rows) != 2 {
 		t.Fatalf("any: %+v", rows)
 	}
 }

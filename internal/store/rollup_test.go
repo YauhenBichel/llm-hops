@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestRollupKeepsTheCountsAfterTheSpansAreGone(t *testing.T) {
 			}
 		}
 	}
-	before, _ := s.Stats(now-30*day, now+day, day)
+	before, _ := s.Stats(context.Background(), now-30*day, now+day, day)
 	if before.Requests != 80 || before.Approx {
 		t.Fatalf("before: %+v", before)
 	}
@@ -35,11 +36,11 @@ func TestRollupKeepsTheCountsAfterTheSpansAreGone(t *testing.T) {
 	if err != nil || n != 40 {
 		t.Fatalf("rolled %d %v", n, err)
 	}
-	left, _ := s.Traces(Filter{})
+	left, _ := s.Traces(context.Background(), Filter{})
 	if len(left) != 40 {
 		t.Fatalf("%d traces left, want the 40 recent ones", len(left))
 	}
-	daily, _ := s.Daily(now-30*day, now)
+	daily, _ := s.Daily(context.Background(), now-30*day, now)
 	var sum int
 	for _, d := range daily {
 		sum += d.Requests
@@ -50,7 +51,7 @@ func TestRollupKeepsTheCountsAfterTheSpansAreGone(t *testing.T) {
 	if sum != 40 {
 		t.Fatalf("daily rows add up to %d", sum)
 	}
-	after, _ := s.Stats(now-30*day, now+day, day)
+	after, _ := s.Stats(context.Background(), now-30*day, now+day, day)
 	if after.Requests != 80 || !after.Approx || after.Errors != before.Errors {
 		t.Fatalf("after: requests %d approx %v errors %d/%d", after.Requests, after.Approx, after.Errors, before.Errors)
 	}
@@ -68,13 +69,13 @@ func TestRollupKeepsTheCountsAfterTheSpansAreGone(t *testing.T) {
 		t.Fatalf("tokens %d != %d", tokBefore, tokAfter)
 	}
 	// a window inside the retained days is exact and unmarked
-	recent, _ := s.Stats(now-3*day, now+day, day)
+	recent, _ := s.Stats(context.Background(), now-3*day, now+day, day)
 	if recent.Requests != 40 || recent.Approx {
 		t.Fatalf("recent: %+v", recent)
 	}
 	// a second run rolls nothing more and changes nothing
 	n, _ = s.RollupAndPrune(14*day, now)
-	again, _ := s.Stats(now-30*day, now+day, day)
+	again, _ := s.Stats(context.Background(), now-30*day, now+day, day)
 	if n != 0 || again.Requests != 80 {
 		t.Fatalf("second run: %d %+v", n, again)
 	}
@@ -90,7 +91,7 @@ func TestExportRoundTrip(t *testing.T) {
 		s.Add(sp)
 	}
 	var got []model.Span
-	if err := s.ExportSpans(0, 1<<62, func(sp model.Span) error { got = append(got, sp); return nil }); err != nil {
+	if err := s.ExportSpans(context.Background(), 0, 1<<62, func(sp model.Span) error { got = append(got, sp); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != want {
@@ -100,8 +101,8 @@ func TestExportRoundTrip(t *testing.T) {
 	if _, err := s2.Add(got); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := s.Stats(0, 1<<62, 60_000)
-	b, _ := s2.Stats(0, 1<<62, 60_000)
+	a, _ := s.Stats(context.Background(), 0, 1<<62, 60_000)
+	b, _ := s2.Stats(context.Background(), 0, 1<<62, 60_000)
 	if a.Requests != b.Requests || a.P95MS != b.P95MS || len(a.Hops) != len(b.Hops) {
 		t.Fatalf("the rebuilt store differs: %+v vs %+v", a, b)
 	}
