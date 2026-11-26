@@ -81,6 +81,42 @@ Three doors other tools already know, all in [docs/integrations.md](docs/integra
 
 The HTTP API is described at `/api/openapi.json`.
 
+## Use with other MCP clients (Grok Build, Cursor, any MCP client)
+
+`llm-hops mcp -to <server-url>` speaks MCP over stdio and reads from a running `llm-hops serve`. Any client that
+starts a stdio server can use it. In `.mcp.json`, `.cursor/mcp.json` or the client's own server list:
+
+```json
+{
+  "mcpServers": {
+    "llm-hops": {
+      "command": "llm-hops",
+      "args": ["mcp", "-to", "http://127.0.0.1:11602"],
+      "env": { "LLM_HOPS_TOKEN": "<your-token>" }
+    }
+  }
+}
+```
+
+Leave `env` out when the server has no `token`. Use the full path to `llm-hops` if the client does not see your `PATH`.
+
+Grok Build (xAI) reads `~/.grok/config.toml`, or `.grok/config.toml` in a project:
+
+```toml
+[mcp_servers.llm-hops]
+command = "llm-hops"
+args = ["mcp", "-to", "http://127.0.0.1:11602"]
+env = { LLM_HOPS_TOKEN = "<your-token>" }
+```
+
+or in one line: `grok mcp add llm-hops -- llm-hops mcp -to http://127.0.0.1:11602`. Grok Build also reads `.mcp.json`
+and `.cursor/mcp.json`, so the JSON above works there too.
+
+Models without MCP support (for example Meta's Muse Spark, whose API offers function calling) can use these tools
+through an MCP-to-function-calling bridge; llm-harness provides one, see llm-harness's README.
+
+Tested with Claude Code. The Grok Build block follows xAI's documentation and has not been run.
+
 ## The API
 
 | Call | Gives |
