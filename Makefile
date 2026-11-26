@@ -1,4 +1,4 @@
-.PHONY: build test lint dist snapshot demo sdk-test
+.PHONY: build test lint dist snapshot npm demo sdk-test
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -23,6 +23,10 @@ dist:
 snapshot:
 	goreleaser check
 	goreleaser release --snapshot --clean --skip=publish
+
+# The npm packages from that snapshot, as folders and tarballs in dist/npm/: nothing is published. Needs node.
+npm: snapshot
+	node npm/build.js --pack
 
 demo: build
 	./llm-hops serve -db /tmp/hops-demo.db -demo 300 -live
