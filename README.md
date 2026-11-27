@@ -1,5 +1,7 @@
 # llm-hops
 
+llm-hops is a free, self-hosted tracing server that shows where the time goes in a request to a local LLM system (router, gateway, queue, model server), for people who run Ollama, llama.cpp or an OpenAI-compatible gateway at home.
+
 **See every hop of a request through your local LLM system.**
 
 A request to a local model rarely takes one step. It passes a router that decides whether it may leave the
@@ -31,15 +33,56 @@ go install github.com/YauhenBichel/llm-hops/cmd/llm-hops@latest   # or download 
 llm-hops serve -demo 300 -live
 ```
 
-With Homebrew, on macOS or Linux (available once the formula is in
-[the tap](https://github.com/YauhenBichel/homebrew-tap); until then use `go install` or a release binary):
+With Homebrew (the formula is in [the tap](https://github.com/YauhenBichel/homebrew-tap); release binaries for
+macOS arm64 and Linux amd64 and arm64 are on the [releases page](https://github.com/YauhenBichel/llm-hops/releases)):
 
 ```bash
 brew install yauhenbichel/tap/llm-hops
 ```
 
 Open http://127.0.0.1:11602/. The demo is a small home LLM system: a router on a laptop, a gateway with one
-slot, a model server that swaps models and loses its cache, five clients.
+slot, a model server that swaps models and loses its cache, five clients. The data is synthetic.
+
+### The same demo as text
+
+The page is the main thing, but everything it shows is also available as text through the MCP server.
+This was captured from `llm-hops serve -demo 300` (on another port, with a temporary database) and
+`llm-hops mcp -to http://127.0.0.1:11699`, calling the tools `hops_stats` and `hops_slowest`:
+
+```text
+Window: 299 requests, 15 errors, p50 15.2 s, p95 1.0 min, max 1.3 min, 92 model switches.
+Where they went:
+  cloud  anthropic     25 requests, 0 errors, tokens in 70000 / out 14621, p50 6.0 s, p95 7.1 s
+  local  ollama       259 requests, 14 errors, tokens in 1481502 / out 75313, p50 22.5 s, p95 1.0 min
+  local  cpu           15 requests, 1 errors, tokens in 5926 / out 0, p50 490 ms, p95 1.1 s
+Time per hop (leaf hops, median / p95):
+  load       n=135   36.2 s / 54.3 s
+  generate   n=244   7.6 s / 17.1 s
+  prefill    n=267   820 ms / 10.2 s
+  upstream   n=25    6.0 s / 7.1 s
+  queue      n=73    482 ms / 2.1 s
+  reply      n=267   3 ms / 5 ms
+  check      n=274   2 ms / 3 ms
+  decide     n=114   2 ms / 4 ms
+```
+
+```text
+11-27 08:46:37  router   agent      gpt-oss:120b               ok     1.3 min  first token 54.9 s
+11-27 08:35:21  router   agent      gpt-oss:120b               ok     1.3 min  first token 58.1 s
+11-27 08:38:48  gateway  pipeline   qwen3-coder-next           error  1.3 min  first token 1.2 min  error=timeout
+```
+
+In this synthetic system the answer to "where did the time go?" is the `load` hop: loading a model takes a
+median 36 s, far more than prefill or generation.
+
+## When to use it, and when not
+
+Use it when a request to a local model sometimes takes far longer than usual and you want to see which hop
+(queue, model load, prefill, generation) caused it, or when several programs share one GPU and you want to see
+who made the others wait.
+
+Do not use it as a general tracing backend for web services (use Jaeger or Tempo), as an LLM evaluation or
+prompt-management tool (use Langfuse or similar), or to store prompts: it stores none.
 
 ## Feed it your system
 
@@ -67,7 +110,8 @@ through Ollama's API), the blob and the seconds. The stats count loads and time 
  "attrs": {"client": "editor", "model": "qwen3-coder-next", "queue_ms": 1200, "ttft_ms": 5564}}
 ```
 
-The Python SDK (`pip install llm-hops`, standard library only) opens spans with a context manager, posts
+The Python SDK (standard library only; not on PyPI yet, install it from a clone with
+`pip install ./sdk/python`) opens spans with a context manager, posts
 them in batches from a background thread, and has a pure ASGI middleware that makes one span per request
 and passes the trace id in the W3C `traceparent` header: [sdk/python](sdk/python/README.md).
 
@@ -87,6 +131,19 @@ Three doors other tools already know, all in [docs/integrations.md](docs/integra
   request as a text waterfall, the flow.
 
 The HTTP API is described at `/api/openapi.json`.
+
+### MCP tools
+
+`llm-hops mcp` is an MCP server over stdio. All five tools only read from a running `llm-hops serve`; none
+changes anything.
+
+| Tool | What it does | Read-only |
+|---|---|---|
+| `hops_stats` | Request counts, error rate, p50/p95, model switches, time per hop and per model for a window | yes |
+| `hops_traces` | The newest requests, filterable by model, client, service, status, minimum duration and free text; at most 100 a call | yes |
+| `hops_trace` | One request in full: every hop with timing and attributes, as a text waterfall | yes |
+| `hops_slowest` | The slowest requests of the window, with where their time went | yes |
+| `hops_flow` | The services seen in the window and the hops between them, with counts and average times | yes |
 
 ## Use with other MCP clients (Grok Build, Cursor, any MCP client)
 
@@ -136,7 +193,6 @@ Tested with Claude Code. The Grok Build block follows xAI's documentation and ha
 | `GET /api/v1/facets?since&until` | the values the filters can take |
 | `GET /api/v1/stream` | server-sent events: one per trace touched |
 | `GET /api/v1/health` | ok, time, database path, uptime |
-
 | `GET /metrics` | Prometheus text: the last five minutes, per hop and per model |
 
 Times are milliseconds since the epoch. Spans older than `keep_days` (14) are rolled up into daily statistics
@@ -172,6 +228,33 @@ fresh server on the same machine:
 | the page during the load | answered in 0.5 ms |
 | statistics over everything (13,742 traces, 100k spans) | 561 ms |
 | database | 30 MB |
+
+## FAQ
+
+### Does it send my data anywhere?
+
+No. The page makes no external requests and the server listens on loopback by default. Prompt and completion
+text are not stored; see [docs/privacy.md](docs/privacy.md) for the rule senders must follow.
+
+### How is it different from Langfuse, Jaeger or OpenTelemetry?
+
+It is one binary and one SQLite file with no other services, built around the hops of a local LLM system
+(queue, model load, prefill, generation). It accepts OpenTelemetry traces (OTLP over HTTP, JSON encoding) but
+is not a replacement for a full tracing backend, and it does not do prompt management or evaluation.
+
+### How do I get traces from Ollama or a gateway without changing code?
+
+Follow a yllm-gateway request log with `-tail`, or Ollama's journal with `-ollama-journal`. See "Feed it your
+system" above. Other systems need a small adapter or code that posts spans to `POST /api/v1/spans`.
+
+### Can I ask an assistant about my traces?
+
+Yes. Add the MCP server with
+`claude mcp add llm-hops -- llm-hops mcp -to http://127.0.0.1:11602`, then ask "why was my last request slow?".
+
+### How long is data kept?
+
+14 days by default (`keep_days`); older spans become daily statistics. See "The API" above.
 
 ## Building
 
