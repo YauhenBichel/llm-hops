@@ -3,8 +3,10 @@
 Open spans in your LLM service and post them to a [llm-hops](https://github.com/YauhenBichel/llm-hops) server.
 Standard library only. A server that is down costs you a warning, never a blocked request.
 
+Not on PyPI yet. Install it from a clone of the repository:
+
 ```bash
-pip install llm-hops
+pip install ./sdk/python
 ```
 
 ## Spans by hand

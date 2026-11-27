@@ -15,7 +15,7 @@ curl -s -X POST http://127.0.0.1:11602/api/v1/spans -H 'content-type: applicatio
         "attrs":{"client":"editor","model":"qwen3-coder-next","prompt_tokens":1200,"completion_tokens":80}}]'
 ```
 
-**Python**: `pip install llm-hops` gives a `Tracer`, an ASGI middleware and `traceparent` helpers
+**Python**: the SDK in `sdk/python` (not on PyPI yet; `pip install ./sdk/python` from a clone) gives a `Tracer`, an ASGI middleware and `traceparent` helpers
 ([sdk/python](../sdk/python/README.md)).
 
 **TypeScript or Node**: `fetch` and one object; see llm-harness's `src/hops.ts` for a 60-line emitter with a
