@@ -193,14 +193,26 @@ func TestMaintainPrunesOldTracesAndKeepsWithinTheSize(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.KeepDays = 3.5
+	// Only whole UTC days before the cutoff's day go, so the count depends on the time of day: before noon
+	// UTC the cutoff falls on the day of the 4-days-old trace, which then stays (5 left); after noon, 4.
+	cutDay := time.UnixMilli(now - int64(cfg.KeepDays*float64(day))).UTC().Truncate(24 * time.Hour).UnixMilli()
+	want := 0
+	for _, sp := range spans {
+		if sp.StartMS >= cutDay {
+			want++
+		}
+	}
+	if want != 4 && want != 5 {
+		t.Fatalf("the test's own count is %d, not 4 or 5", want)
+	}
 	maintain(st, cfg)
-	if n := left(); n != 4 {
-		t.Fatalf("keep_days=3.5 left %d traces, not the 4 newest", n)
+	if n := left(); n != want {
+		t.Fatalf("keep_days=3.5 left %d traces, not the %d that started on or after the cutoff's UTC day", n, want)
 	}
 	cfg.MaxDBMB = 1 // the data fits: nothing more goes
 	maintain(st, cfg)
-	if n := left(); n != 4 {
-		t.Fatalf("max_db_mb=1 on a small file left %d", n)
+	if n := left(); n != want {
+		t.Fatalf("max_db_mb=1 on a small file left %d, not %d", n, want)
 	}
 	daily, err := st.Daily(ctx, 0, now+day)
 	if err != nil || len(daily) == 0 {
